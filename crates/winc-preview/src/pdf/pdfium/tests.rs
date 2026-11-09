@@ -321,3 +321,40 @@ fn annotate_a_real_file() {
     let out = path.with_extension("annotated.pdf");
     save_checked(&doc, &out);
 }
+
+/// 手动测速：逐页渲染 `WINC_PDF_SAMPLE` 指定的 PDF（宽 1600 像素），能读文字时再逐页读文字和
+/// 批注，打印总耗时和每页平均耗时。设置 `WINC_PDFIUM` 时用 PDFium，不设置时用
+/// `Windows.Data.Pdf`，两次对比。用 `--release` 运行，结果才有参考价值。
+#[test]
+#[ignore = "测速，需要真实的 PDF，手动运行"]
+fn measure_render_speed() {
+    let path = std::path::PathBuf::from(std::env::var_os("WINC_PDF_SAMPLE").unwrap());
+    let engine = if available() {
+        "PDFium"
+    } else {
+        "Windows.Data.Pdf"
+    };
+    let started = std::time::Instant::now();
+    let doc = Pdf::open(&path).unwrap();
+    let opened = started.elapsed();
+    let pages = doc.pages().to_vec();
+    let started = std::time::Instant::now();
+    for (i, page) in pages.iter().enumerate() {
+        let height = (1600.0 * page.height / page.width).round() as u32;
+        doc.render(i, 1600, height).unwrap();
+    }
+    let render = started.elapsed();
+    let started = std::time::Instant::now();
+    let mut chars = 0;
+    for i in 0..pages.len() {
+        chars += doc.text(i).unwrap().len();
+        doc.annotations(i).unwrap();
+    }
+    let text = started.elapsed();
+    let n = pages.len() as u32;
+    eprintln!(
+        "{engine}: 打开 {opened:?}；渲染 {n} 页 {render:?}（每页 {:?}）；读文字和批注 {text:?}（每页 {:?}，共 {chars} 字）",
+        render / n,
+        text / n
+    );
+}
