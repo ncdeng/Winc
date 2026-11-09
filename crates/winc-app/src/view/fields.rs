@@ -2,9 +2,6 @@
 
 use super::*;
 
-/// 多行输入框的行高（逻辑像素）。
-pub(super) const AREA_LINE: f32 = 20.0;
-
 /// 多行输入框（[`TextField::multiline`]）按宽度折好的行：[`wrap_area_field`] 排一次，框的高度
 /// 按它的行数定，再交给 [`draw_area_field`] 绘制：一帧里只测量一次宽度、只做一次折行。
 pub(super) struct AreaWrap {

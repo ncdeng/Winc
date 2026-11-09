@@ -160,7 +160,7 @@ impl App {
             return Target::Panel(hover);
         }
         // 跳转条画在查找条上面（窄窗口里两者会重叠）；正在输入名字的那一行在文件树里。
-        if (self.goto_input.is_some() && goto_bar(l.editor).contains(x, y))
+        if (self.goto_input.is_some() && self.prompt_bar().contains(x, y))
             || self.name_input_rect().is_some_and(|r| r.contains(x, y))
         {
             return Target::Prompt;

@@ -311,6 +311,19 @@ impl SearchParts {
     }
 }
 
+/// PDF 批注输入条最多显示的行数：文字更多时在输入条里纵向滚动。
+pub const NOTE_LINES: u32 = 6;
+
+/// 返回 PDF 批注输入条的位置：和跳转条一样位于编辑区顶部居中，但更宽（最多 640 像素），文字按
+/// 宽度折行，输入条随行数 `lines` 增高（最多 [`NOTE_LINES`] 行）。长批注不必横向滚动，写过的
+/// 字都看得见。绘制和点击判断共用。
+pub fn note_bar(editor: Rect, lines: u32) -> Rect {
+    let width = 640.0_f32.min(editor.w - 40.0).max(0.0);
+    let x = (editor.x + (editor.w - width) / 2.0).round();
+    let extra = (lines.clamp(1, NOTE_LINES) - 1) as f32 * AREA_LINE;
+    Rect::new(x, editor.y + 8.0, width, BAR_HEIGHT + extra)
+}
+
 /// 返回「跳转到行」输入条（⌃G）的位置：位于编辑区顶部居中，绘制和点击判断共用。
 ///
 /// 宽度最多 320 像素，编辑区较窄时随它收窄；顶边距编辑区 8 像素。

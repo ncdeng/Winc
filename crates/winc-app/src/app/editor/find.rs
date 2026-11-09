@@ -483,6 +483,19 @@ impl App {
         self.request_redraw();
     }
 
+    /// 输入条的位置：写 PDF 批注时是会折行的宽输入条（见 [`crate::layout::note_bar`]，行数取上一帧
+    /// 折出的行数），其余是跳转条。
+    pub(crate) fn prompt_bar(&self) -> Rect {
+        let editor = self.layout.editor;
+        match (&self.prompt_kind, &self.goto_input) {
+            (PromptKind::PdfComment, Some(field)) => {
+                let lines = field.view.rows.last().map_or(1, |row| row + 1);
+                crate::layout::note_bar(editor, lines)
+            }
+            _ => crate::layout::goto_bar(editor),
+        }
+    }
+
     /// 关闭跳转条，以及文件树中输入名字的那一行。
     pub(in crate::app) fn close_prompt(&mut self) {
         self.goto_input = None;

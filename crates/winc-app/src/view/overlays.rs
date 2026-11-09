@@ -12,7 +12,7 @@ use crate::app::{
     PickerPart, folder_label,
 };
 use crate::icons::Direction;
-use crate::layout::{PickerParts, SearchButton, goto_bar};
+use crate::layout::{NOTE_LINES, PickerParts, SearchButton, goto_bar, note_bar};
 
 /// 绘制查找条（⌘F、⌥⌘F）：浮在编辑区右上角，内含查找输入框，展开后含替换输入框。
 pub(super) fn draw_search(app: &mut App, frame: &mut Frame<'_>) {
@@ -217,8 +217,6 @@ pub(super) fn draw_goto(app: &mut App, frame: &mut Frame<'_>) {
     let caret = {
         let app = &*app;
         let p = app.palette;
-        let bar = goto_bar(app.layout.editor);
-        draw_card(frame, p, bar, RADIUS_BAR, p.popup_bg);
 
         // 跳转到行、储藏说明，或者输入新标签的名字。
         let (title, placeholder, hint) = match &app.prompt_kind {
@@ -254,16 +252,37 @@ pub(super) fn draw_goto(app: &mut App, frame: &mut Frame<'_>) {
                 t!("preview-pdf-comment-hint").to_owned(),
             ),
         };
-        // 右侧的说明最多占一半宽度，保证输入框留有空间。
-        let (size, max) = (app.fonts.ui_small, bar.w / 2.0);
-        let hint = super::ellipsize(frame, &hint, size, max).into_owned();
-        let hint_x = bar.right() - 14.0 - frame.measure(FontKind::Ui, app.fonts.ui_small, &hint);
-        ui_text_small(frame, app, hint_x, bar, &hint, p.text_dim, bar);
-
-        let start = ui_text(frame, app, bar.x + 14.0, bar, title, p.text_muted, bar) + 10.0;
-        let area = Rect::new(start, bar.y, (hint_x - 10.0 - start).max(0.0), bar.h);
         let focused = app.focus == Focus::Prompt;
-        draw_bar_field(app, frame, area, &mut field, placeholder, focused)
+        // PDF 批注可能很长：用更宽的输入条，文字折行，输入条随行数增高。
+        let note = matches!(app.prompt_kind, crate::app::PromptKind::PdfComment);
+        let editor = app.layout.editor;
+        let head = if note {
+            note_bar(editor, 1)
+        } else {
+            goto_bar(editor)
+        };
+        // 右侧的说明最多占一半宽度，保证输入框留有空间。
+        let (size, max) = (app.fonts.ui_small, head.w / 2.0);
+        let hint = super::ellipsize(frame, &hint, size, max).into_owned();
+        let hint_x = head.right() - 14.0 - frame.measure(FontKind::Ui, app.fonts.ui_small, &hint);
+        let start = head.x + 14.0 + frame.measure(FontKind::Ui, app.fonts.ui, title) + 10.0;
+        let width = (hint_x - 10.0 - start).max(0.0);
+        let wrap = note.then(|| wrap_area_field(app, frame, width, &mut field, focused));
+        let lines = wrap.as_ref().map_or(1, |w| w.lines() as u32);
+        let bar = if note { note_bar(editor, lines) } else { head };
+        draw_card(frame, p, bar, RADIUS_BAR, p.popup_bg);
+
+        // 标题和说明与第一行文字对齐。
+        ui_text_small(frame, app, hint_x, head, &hint, p.text_dim, bar);
+        ui_text(frame, app, head.x + 14.0, head, title, p.text_muted, bar);
+        if let Some(wrap) = wrap {
+            let shown = lines.min(NOTE_LINES) as f32 * AREA_LINE;
+            let area = Rect::new(start, bar.y + (BAR_HEIGHT - AREA_LINE) / 2.0, width, shown);
+            draw_area_field(app, frame, area, &mut field, wrap, placeholder, focused)
+        } else {
+            let area = Rect::new(start, bar.y, width, bar.h);
+            draw_bar_field(app, frame, area, &mut field, placeholder, focused)
+        }
     };
 
     app.goto_input = Some(field);

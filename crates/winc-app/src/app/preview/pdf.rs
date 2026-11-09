@@ -935,7 +935,7 @@ impl App {
             return;
         }
         self.pdf.pending = Some(Pending::Highlight(segments));
-        self.open_pdf_comment_prompt(TextField::default());
+        self.open_pdf_comment_prompt(TextField::multiline());
     }
 
     /// 改写右键点中的批注的注释：输入框里是现在的注释并已全选。
@@ -946,7 +946,7 @@ impl App {
         let Some(note) = self.pdf.texts.get(&page).and_then(|t| t.notes.get(i)) else {
             return;
         };
-        let mut field = TextField::default();
+        let mut field = TextField::multiline();
         field.set_text(&note.comment);
         self.pdf.pending = Some(Pending::Comment {
             page,

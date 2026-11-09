@@ -677,6 +677,8 @@ pub const TAB_WIDTH_MAX: f32 = 180.0;
 pub const TAB_WIDTH_MIN: f32 = 80.0;
 /// 查找条、跳转条（单行）的高度。
 pub const BAR_HEIGHT: f32 = 36.0;
+/// 多行输入框（提交信息、PDF 批注）一行的高度。
+pub const AREA_LINE: f32 = 20.0;
 
 // 按钮尺寸：只有 `BUTTON`、`BUTTON_SMALL` 和 `TOGGLE_W`（宽度）三种，圆角均为 `RADIUS_ROW`。
 /// 顶栏上的按钮（侧栏开关、「文件 / 搜索」、新建标签）和设置卡片的关闭按钮。

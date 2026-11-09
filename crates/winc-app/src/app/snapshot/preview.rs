@@ -3276,6 +3276,23 @@ fn pdf_text_can_be_selected_annotated_and_saved() {
     );
     app.run_menu_command(MenuCommand::PdfComment);
     assert_eq!(app.prompt_kind, crate::app::PromptKind::PdfComment);
+    // 长批注折行显示：输入条随行数增高，写过的字都看得见；最多显示 `NOTE_LINES` 行，再多在
+    // 输入条里滚动。批注里可以换行。
+    paint(&mut app);
+    let one_line = app.prompt_bar().h;
+    let field = app.goto_input.as_mut().unwrap();
+    field.set_text(&"这一段的论证不够充分，".repeat(8));
+    paint(&mut app);
+    assert!(app.prompt_bar().h > one_line);
+    let field = app.goto_input.as_mut().unwrap();
+    field.set_text(&"很长的批注".repeat(200));
+    paint(&mut app);
+    let tallest = crate::layout::note_bar(app.layout.editor, crate::layout::NOTE_LINES);
+    assert_eq!(app.prompt_bar(), tallest);
+    let field = app.goto_input.as_mut().unwrap();
+    field.set_text("");
+    assert!(field.insert("第一行\n第二行"));
+    assert_eq!(field.text(), "第一行\n第二行");
     app.goto_input.as_mut().unwrap().set_text("改成 Chapter 1");
     app.submit_prompt();
     pdf_until(&mut app, |app| {
@@ -3382,5 +3399,26 @@ fn without_pdfium_the_pdf_offers_to_download_it() {
     pdf_until(&mut app, |app| {
         app.pdf.editable && app.pdf.texts.contains_key(&0)
     });
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 写长批注时的输入条截图（需要 `WINC_PDFIUM`）。
+#[cfg(windows)]
+#[test]
+#[ignore = "截图，手动运行"]
+fn shoot_pdf_comment() {
+    let dir = sample_folder("pdf-comment-shot");
+    let path = dir.join("论文.pdf");
+    std::fs::write(&path, sample_pdf(2)).unwrap();
+    let mut app = open_pdf(&path, false);
+    assert!(app.pdf.editable, "需要 WINC_PDFIUM");
+    pdf_until(&mut app, |app| app.pdf.texts.contains_key(&0));
+    app.pdf_select_all();
+    app.pdf_comment_selection();
+    app.goto_input.as_mut().unwrap().set_text(
+        "开篇就是这个呢？这一段的论证不够充分，建议先交代研究背景，再引出问题；\
+         另外第二句和第三句的意思重复了，可以合并成一句。\n还有：图 1 的说明文字太短。",
+    );
+    shoot(&mut app, "pdf-comment");
     let _ = std::fs::remove_dir_all(&dir);
 }

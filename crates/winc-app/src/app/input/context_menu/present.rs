@@ -263,7 +263,7 @@ impl App {
     fn editor_context_target(&mut self, x: f32, y: f32) -> Option<DocumentId> {
         let l = self.layout;
         let covered = l.search.contains(x, y)
-            || (self.goto_input.is_some() && goto_bar(l.editor).contains(x, y))
+            || (self.goto_input.is_some() && self.prompt_bar().contains(x, y))
             || self.over_corner_card(x, y);
         if covered || !l.editor.contains(x, y) {
             return None;

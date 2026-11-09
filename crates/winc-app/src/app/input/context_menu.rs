@@ -18,7 +18,7 @@ use super::*;
 use crate::app::git::location_picker::Place;
 use crate::icons;
 use crate::keymap::{self, Action, Context, Stroke};
-use crate::layout::{goto_bar, hit};
+use crate::layout::hit;
 
 mod menus;
 mod popup;

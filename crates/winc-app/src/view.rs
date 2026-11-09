@@ -17,7 +17,7 @@ use crate::app::{App, DropZone, Hover, MenuButton, ScrollArea, ThumbLook};
 use crate::field::{FieldView, TextField};
 use crate::icons;
 use crate::keymap::{self, Action};
-use crate::layout::{SearchParts, goto_bar, scrollbar_thumb};
+use crate::layout::{SearchParts, scrollbar_thumb};
 use crate::theme::*;
 
 mod alert;
@@ -119,7 +119,7 @@ pub fn draw(app: &mut App, frame: &mut Frame<'_>) {
     draw_card_ghost(app, frame, Card::Bar);
     draw_card_ghost(app, frame, Card::Picker);
     if bar_open {
-        let rect = goto_bar(app.layout.editor);
+        let rect = app.prompt_bar();
         draw_moving_card(app, frame, Card::Bar, rect, draw_goto);
     }
     if picker_open {
