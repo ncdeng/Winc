@@ -317,8 +317,9 @@ fn wide(text: &str) -> Vec<u16> {
 pub(super) struct Document {
     api: &'static Api,
     doc: Handle,
-    /// 文件内容：PDFium 在文档关闭前一直读取这块内存，因此与文档同生命周期。
-    _bytes: Vec<u8>,
+    /// 文件内容：PDFium 在文档关闭前一直读取这块内存，因此与文档同生命周期；增量保存后还用来
+    /// 认出 PDFium 追加的那一段（见 `indirect`）。
+    bytes: Vec<u8>,
 }
 
 impl Drop for Document {
@@ -410,11 +411,7 @@ impl Document {
             }
             doc
         };
-        let document = Document {
-            api,
-            doc,
-            _bytes: bytes,
-        };
+        let document = Document { api, doc, bytes };
         let pages = document.page_sizes()?;
         Ok((document, pages))
     }
@@ -867,7 +864,8 @@ impl Document {
         if ok == 0 || writer.out.is_empty() {
             return Err(t!("preview-pdf-save-failed").to_owned());
         }
-        Ok(writer.out)
+        // 批注改成规范要求的间接对象，没有改动的对象不再重复写入（见 `indirect`）。
+        Ok(indirect::tidy_incremental_save(&self.bytes, writer.out))
     }
 }
 
@@ -891,6 +889,8 @@ fn merge_lines(boxes: &[RectF]) -> Vec<RectF> {
     }
     lines
 }
+
+mod indirect;
 
 #[cfg(test)]
 mod tests;

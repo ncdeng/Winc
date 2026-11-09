@@ -72,6 +72,52 @@ fn write(name: &str, bytes: &[u8]) -> std::path::PathBuf {
     path
 }
 
+/// 保存 `doc` 到 `path`，并检查保存结果：批注都是间接对象（`/Annots` 中没有直接写的字典），
+/// 交叉引用的偏移指向各对象。
+fn save_checked(doc: &Pdf, path: &std::path::Path) {
+    let bytes = doc.save().unwrap();
+    assert!(
+        !bytes.windows(10).any(|w| w == b"/Annots[<<"),
+        "批注直接写在了 /Annots 数组里"
+    );
+    super::indirect::tests::assert_offsets_point_at_objects(&bytes);
+    std::fs::write(path, bytes).unwrap();
+}
+
+/// 把 [`sample_pdf`] 的交叉引用表换成交叉引用流（不压缩，`/W[1 4 2]`），TeX 生成的 PDF 多是
+/// 这种格式。
+fn sample_pdf_with_xref_stream(pages: &[(u32, u32, u32)]) -> Vec<u8> {
+    let table = sample_pdf(pages);
+    let text = String::from_utf8_lossy(&table).into_owned();
+    let xref = text.rfind("xref\n0 ").unwrap();
+    let mut out = table[..xref].to_vec();
+    let offsets: Vec<u32> = text[xref..]
+        .lines()
+        .skip(3)
+        .take_while(|l| l.ends_with(" n "))
+        .map(|l| l[..10].parse().unwrap())
+        .collect();
+    let number = offsets.len() + 1;
+    let mut rows = vec![0u8, 0, 0, 0, 0, 0xff, 0xff];
+    for offset in offsets.iter().copied().chain([out.len() as u32]) {
+        rows.push(1);
+        rows.extend_from_slice(&offset.to_be_bytes());
+        rows.extend_from_slice(&[0, 0]);
+    }
+    let start = out.len();
+    out.extend(
+        format!(
+            "{number} 0 obj\n<< /Type /XRef /Size {} /W [1 4 2] /Root 1 0 R /Length {} >>\nstream\n",
+            number + 1,
+            rows.len()
+        )
+        .as_bytes(),
+    );
+    out.extend(&rows);
+    out.extend(format!("\nendstream\nendobj\nstartxref\n{start}\n%%EOF\n").as_bytes());
+    out
+}
+
 /// 第 0 页文字中 `word` 所在的字序号范围。
 fn find(doc: &Pdf, word: &str) -> std::ops::Range<usize> {
     let text: String = doc.text(0).unwrap().iter().map(|c| c.ch).collect();
@@ -164,7 +210,7 @@ fn annotations_survive_saving_and_can_be_edited_and_removed() {
         doc.annotate(0, AnnotationKind::Highlight, 0..0, "")
             .is_err()
     );
-    std::fs::write(&path, doc.save().unwrap()).unwrap();
+    save_checked(&doc, &path);
     drop(doc);
 
     let mut doc = Pdf::open(&path).unwrap();
@@ -193,7 +239,7 @@ fn annotations_survive_saving_and_can_be_edited_and_removed() {
         .unwrap()
         .index;
     doc.remove_annotation(0, underline).unwrap();
-    std::fs::write(&path, doc.save().unwrap()).unwrap();
+    save_checked(&doc, &path);
     drop(doc);
 
     let doc = Pdf::open(&path).unwrap();
@@ -215,4 +261,63 @@ fn an_open_document_does_not_lock_its_file() {
     assert_eq!(doc.pages()[0].width, 200.0);
     drop(doc);
     let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn annotations_in_a_file_with_an_xref_stream_are_saved_as_objects() {
+    if !ready() {
+        return;
+    }
+    let path = write(
+        "xref-stream.pdf",
+        &sample_pdf_with_xref_stream(&[(612, 792, 0)]),
+    );
+    let mut doc = Pdf::open(&path).unwrap();
+    doc.annotate(0, AnnotationKind::Highlight, find(&doc, "world"), "第一条")
+        .unwrap();
+    save_checked(&doc, &path);
+    drop(doc);
+    // 再打开、再加一条：第二次保存时前一条已是间接对象，只改写新的一条。
+    let mut doc = Pdf::open(&path).unwrap();
+    doc.annotate(0, AnnotationKind::StrikeOut, find(&doc, "Hello"), "第二条")
+        .unwrap();
+    save_checked(&doc, &path);
+    drop(doc);
+    let doc = Pdf::open(&path).unwrap();
+    let mut comments: Vec<String> = doc
+        .annotations(0)
+        .unwrap()
+        .into_iter()
+        .map(|a| a.comment)
+        .collect();
+    comments.sort();
+    assert_eq!(comments, ["第一条", "第二条"]);
+    let _ = std::fs::remove_file(&path);
+}
+
+/// 手动检查真实文件：给 `WINC_PDF_SAMPLE` 指定的 PDF 第 1 页的前两个词各加一条带注释的批注，
+/// 另存为同目录下的 `*.annotated.pdf`，再用其他程序（如 PyMuPDF）读取，确认批注能被读出。
+#[test]
+#[ignore = "需要真实的 PDF，手动运行"]
+fn annotate_a_real_file() {
+    assert!(ready());
+    let path = std::path::PathBuf::from(std::env::var_os("WINC_PDF_SAMPLE").unwrap());
+    let mut doc = Pdf::open(&path).unwrap();
+    let text: Vec<char> = doc.text(0).unwrap().iter().map(|c| c.ch).collect();
+    let words: Vec<std::ops::Range<usize>> = text
+        .split(|c| c.is_whitespace())
+        .scan(0, |at, word| {
+            let range = *at..*at + word.len();
+            *at += word.len() + 1;
+            Some(range)
+        })
+        .filter(|r| r.len() >= 2)
+        .take(2)
+        .collect();
+    doc.annotate(0, AnnotationKind::Highlight, words[0].clone(), "测试批注一")
+        .unwrap();
+    doc.annotate(0, AnnotationKind::Underline, words[1].clone(), "测试批注二")
+        .unwrap();
+    let out = path.with_extension("annotated.pdf");
+    save_checked(&doc, &out);
 }
