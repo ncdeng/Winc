@@ -1,4 +1,5 @@
-//! `install` 的测试：手工拼出 tgz，取出其中的文件；核对不符的安装包不安装。
+//! `install` 的测试：手工拼出 tgz，取出其中的文件；只装许可证和动态库；核对不符的安装包不
+//! 安装。
 
 use super::*;
 
@@ -33,16 +34,40 @@ fn files_come_out_of_a_tgz() {
         ("./bin/pdfium.dll", b"MZ fake dll".as_slice()),
         ("lib/pdfium.dll.lib", b"lib".as_slice()),
     ]);
+    let tar = gunzip(&archive).unwrap();
     assert_eq!(
-        extract(&archive, "bin/pdfium.dll").as_deref(),
-        Some(b"MZ fake dll".as_slice())
+        files(&tar).unwrap(),
+        vec![
+            ("LICENSE".to_owned(), b"license text".as_slice()),
+            ("bin/pdfium.dll".to_owned(), b"MZ fake dll".as_slice()),
+            ("lib/pdfium.dll.lib".to_owned(), b"lib".as_slice()),
+        ]
     );
+    assert_eq!(gunzip(b"not gzip data at all"), None);
+    // 第二个文件（文件头在 1024 字节处，内容从 1536 字节起）的内容被截断：不是完整的 tar。
+    assert_eq!(files(&tar[..1540]), None);
+}
+
+#[test]
+fn only_license_files_are_copied_beside_the_library() {
+    let licenses = Path::new("licenses");
+    assert_eq!(license_name("LICENSE"), Some(PathBuf::from("LICENSE")));
     assert_eq!(
-        extract(&archive, "LICENSE").as_deref(),
-        Some(b"license text".as_slice())
+        license_name("licenses/pdfium.txt"),
+        Some(licenses.join("pdfium.txt"))
     );
-    assert_eq!(extract(&archive, "bin/missing.dll"), None);
-    assert_eq!(extract(b"not gzip data at all", "LICENSE"), None);
+    for path in [
+        "VERSION",
+        "bin/pdfium.dll",
+        "licenses/",
+        "licenses/../pdfium.dll",
+        "licenses/sub/a.txt",
+        "licenses/..\\a.txt",
+        "licenses/C:a.txt",
+        "licenses/.hidden",
+    ] {
+        assert_eq!(license_name(path), None, "{path}");
+    }
 }
 
 #[test]
@@ -54,6 +79,18 @@ fn archives_that_do_not_match_are_not_installed() {
     assert_eq!(
         sha256(b"abc"),
         "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+}
+
+/// CI 下载 PDFium 的脚本固定的版本和哈希与这里相同。
+#[test]
+fn the_ci_script_pins_the_same_archive() {
+    let script = include_str!("../../../../../../release/windows/pdfium.ps1");
+    assert!(script.contains(ARCHIVE_SHA256));
+    let version = ARCHIVE_URL.split('/').rev().nth(1).unwrap();
+    assert!(
+        script.contains(&format!("$version = '{version}'")),
+        "{version}"
     );
 }
 
@@ -69,5 +106,7 @@ fn the_pinned_archive_installs() {
     install(&archive, &dir).unwrap();
     let dll = std::fs::read(dir.join("pdfium.dll")).unwrap();
     assert_eq!(sha256(&dll), DLL_SHA256);
+    assert!(dir.join("LICENSE").is_file());
+    assert!(dir.join("licenses").join("pdfium.txt").is_file());
     let _ = std::fs::remove_dir_all(&dir);
 }

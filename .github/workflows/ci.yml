@@ -119,11 +119,30 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends zsh fish fonts-dejavu-core fonts-noto-cjk
 
+      # winc does not ship PDFium. The test step below runs without it and installs it from the
+      # pinned archive, the way users download it; the step after it runs the PDF tests again with
+      # PDFium loaded, covering text selection and annotations.
+      - name: Fetch PDFium
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          ./release/windows/pdfium.ps1 -Destination target/pdfium
+          "WINC_PDFIUM_ARCHIVE=$((Resolve-Path target/pdfium/pdfium-win-x64.tgz).Path)" >> $env:GITHUB_ENV
+
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Test
         run: cargo test --workspace --locked --no-fail-fast
+
+      - name: Test PDFs with PDFium
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:WINC_PDFIUM = (Resolve-Path target/pdfium/pdfium.dll).Path
+          cargo test -p winc-preview -p winc-app --locked --no-fail-fast pdf
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       # The step above runs on the system's ConPTY; this one repeats the end-to-end tests on the
       # version the installers ship. The files are removed so the build cache never holds them.

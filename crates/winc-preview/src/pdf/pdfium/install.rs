@@ -1,12 +1,16 @@
-//! 安装 PDFium：从固定版本的安装包（`.tgz`）中取出 `bin/pdfium.dll`，核对后放进指定的目录。
+//! 安装 PDFium：从固定版本的安装包（`.tgz`）中取出 `bin/pdfium.dll` 和许可证，核对后放进指定的
+//! 目录。
 //!
 //! 安装包来自 [`ARCHIVE_URL`]（bblanchon/pdfium-binaries 发布的 Windows x64 版本），下载由
 //! 调用方完成（本 crate 不联网）。安装包和取出的动态库都按 SHA-256 核对，任何一项不符就不
-//! 安装：下载被篡改或版本被替换时不会加载来路不明的代码。动态库先写进同一目录下的临时文件，
-//! 核对、写完后再改名，中途失败不会留下半个文件。
+//! 安装：下载被篡改或版本被替换时不会加载来路不明的代码。
+//!
+//! 许可证随动态库一起安装：`LICENSE`（pdfium-binaries 的构建脚本）和 `licenses/` 下 PDFium 及其
+//! 依赖库的许可证。动态库最后写入：先写进同一目录下的临时文件，写完后再改名，中途失败不会留下
+//! 半个文件，`pdfium.dll` 存在就说明安装完整。
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 use winc_i18n::t;
@@ -36,36 +40,61 @@ fn sha256(data: &[u8]) -> String {
         .collect()
 }
 
-/// 核对安装包 `archive`，取出其中的 `pdfium.dll` 写进 `dir`（目录不存在时创建）。
+/// 核对安装包 `archive`，取出其中的 `pdfium.dll` 和许可证写进 `dir`（目录不存在时创建）。
 pub(super) fn install(archive: &[u8], dir: &Path) -> Result<(), String> {
     if sha256(archive) != ARCHIVE_SHA256 {
         return Err(bad_archive());
     }
-    let dll = extract(archive, "bin/pdfium.dll").ok_or_else(bad_archive)?;
-    if sha256(&dll) != DLL_SHA256 {
+    let tar = gunzip(archive).ok_or_else(bad_archive)?;
+    let files = files(&tar).ok_or_else(bad_archive)?;
+    let dll = files
+        .iter()
+        .find(|(path, _)| path == "bin/pdfium.dll")
+        .map(|&(_, data)| data)
+        .ok_or_else(bad_archive)?;
+    if sha256(dll) != DLL_SHA256 {
         return Err(bad_archive());
     }
-    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let io = |e: std::io::Error| e.to_string();
+    std::fs::create_dir_all(dir.join("licenses")).map_err(io)?;
+    for (path, data) in &files {
+        if let Some(name) = license_name(path) {
+            std::fs::write(dir.join(name), data).map_err(io)?;
+        }
+    }
     let target = dir.join("pdfium.dll");
     let part = dir.join(format!("pdfium.dll.part{}", std::process::id()));
     let written = std::fs::File::create(&part)
-        .and_then(|mut file| file.write_all(&dll).and_then(|()| file.sync_all()))
+        .and_then(|mut file| file.write_all(dll).and_then(|()| file.sync_all()))
         .and_then(|()| std::fs::rename(&part, &target));
     if let Err(e) = written {
         let _ = std::fs::remove_file(&part);
-        return Err(e.to_string());
+        return Err(io(e));
     }
     Ok(())
 }
 
-/// 从 gzip 压缩的 tar 包 `archive` 中取出名为 `name` 的普通文件（名字前可以有 `./`）。
-fn extract(archive: &[u8], name: &str) -> Option<Vec<u8>> {
-    let tar = gunzip(archive)?;
+/// 安装包中的路径 `path` 是许可证时，返回它在安装目录中的相对路径：`LICENSE`，或
+/// `licenses` 目录下的文件名。其他文件，以及名字里带目录分隔符或以 `.` 开头的文件，返回
+/// `None`。
+fn license_name(path: &str) -> Option<PathBuf> {
+    if path == "LICENSE" {
+        return Some(PathBuf::from("LICENSE"));
+    }
+    let name = path.strip_prefix("licenses/")?;
+    let plain = !name.is_empty() && !name.starts_with('.') && !name.contains(['/', '\\', ':']);
+    plain.then(|| Path::new("licenses").join(name))
+}
+
+/// 解压后的 tar 数据 `tar` 中的普通文件：（路径，内容），路径去掉开头的 `./`。格式不对时返回
+/// `None`。
+fn files(tar: &[u8]) -> Option<Vec<(String, &[u8])>> {
+    let mut files = Vec::new();
     let mut at = 0;
     while at + 512 <= tar.len() {
         let header = &tar[at..at + 512];
         if header.iter().all(|&b| b == 0) {
-            return None;
+            break;
         }
         let field = |range: std::ops::Range<usize>| {
             let raw = &header[range];
@@ -82,13 +111,13 @@ fn extract(archive: &[u8], name: &str) -> Option<Vec<u8>> {
             }
         }
         let data = at + 512;
-        let regular = matches!(header[156], b'0' | 0);
-        if regular && path.trim_start_matches("./") == name {
-            return tar.get(data..data.checked_add(size)?).map(<[u8]>::to_vec);
+        if matches!(header[156], b'0' | 0) {
+            let content = tar.get(data..data.checked_add(size)?)?;
+            files.push((path.trim_start_matches("./").to_owned(), content));
         }
         at = data + size.div_ceil(512) * 512;
     }
-    None
+    Some(files)
 }
 
 /// 解开 gzip 数据（RFC 1952）：跳过文件头，解压其中的 deflate 数据。
