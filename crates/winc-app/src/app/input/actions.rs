@@ -173,6 +173,7 @@ impl App {
             Copy => self.copy(false),
             Paste => self.paste(),
             SelectAll if self.markdown_focused() => self.markdown_select_all(),
+            SelectAll if self.pdf_focused() => self.pdf_select_all(),
             SelectAll if self.table_focused() => self.table_select_all(),
             SelectAll if self.focus == Focus::Tree => {
                 if let Some(ws) = &mut self.editor.workspace {

@@ -106,3 +106,7 @@ preview-pdf-empty = PDF 中没有页面
 preview-pdf-render-failed = 无法渲染这一页
 preview-pdf-annotate-failed = 无法修改这里的批注
 preview-pdf-save-failed = 无法保存 PDF 中的批注
+preview-pdf-saved = 批注已保存到 PDF
+preview-pdf-comment-title = 批注
+preview-pdf-comment-placeholder = 写下这里要怎么改
+preview-pdf-comment-hint = 回车保存到 PDF，Esc 取消

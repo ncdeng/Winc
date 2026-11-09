@@ -248,6 +248,11 @@ pub(super) fn draw_goto(app: &mut App, frame: &mut Frame<'_>) {
                     commit = crate::app::git::log::short(at)
                 ),
             ),
+            crate::app::PromptKind::PdfComment => (
+                t!("preview-pdf-comment-title"),
+                t!("preview-pdf-comment-placeholder"),
+                t!("preview-pdf-comment-hint").to_owned(),
+            ),
         };
         // 右侧的说明最多占一半宽度，保证输入框留有空间。
         let (size, max) = (app.fonts.ui_small, bar.w / 2.0);

@@ -286,6 +286,7 @@ impl App {
             Drag::Minimap { from, scroll } => self.drag_minimap(y, from, scroll),
             Drag::LogText => self.drag_log_text(x, y),
             Drag::MarkdownText => self.drag_markdown(x, y),
+            Drag::PdfText => self.drag_pdf(x, y),
             Drag::TableCells => self.drag_table(x, y),
             Drag::Field => {
                 if let Some(field) = self.focused_field() {

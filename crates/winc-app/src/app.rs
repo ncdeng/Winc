@@ -291,6 +291,8 @@ pub enum PromptKind {
     NewTag { at: String },
     /// 分支的新名字；`old` 是现在的名字。
     RenameBranch { old: String },
+    /// PDF 批注的注释文字（给选中的字加带注释的高亮，或改写已有批注的注释）。
+    PdfComment,
 }
 
 /// 键盘焦点所在的区域。
@@ -381,6 +383,8 @@ impl Focus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hover {
     None,
+    /// PDF 上带注释的批注：（页号，在该页批注中的位置），停留后显示注释文字。
+    PdfNote(usize, usize),
     /// 文件视图底部大纲里的一处（符号行、行首箭头、标题行及其右端的按钮）。
     Outline(OutlineTarget),
     /// 编辑区右侧的缩略图。
@@ -476,6 +480,7 @@ impl Hover {
         matches!(
             self,
             Hover::TreeTool(_)
+                | Hover::PdfNote(..)
                 | Hover::TerminalHeader(
                     terminal::HeaderHit::Position
                         | terminal::HeaderHit::ShellMenu
@@ -575,6 +580,8 @@ enum Drag {
     LogText,
     /// 在 Markdown 预览里拖着选字（`App::drag_markdown`）。
     MarkdownText,
+    /// 在 PDF 预览里拖着选字（`App::drag_pdf`）。
+    PdfText,
     /// 在表格中拖着选单元格（`App::drag_table`）。
     TableCells,
     /// 在终端里拖着选字。

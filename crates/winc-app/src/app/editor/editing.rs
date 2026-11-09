@@ -530,6 +530,14 @@ impl App {
             self.copy_table();
             return;
         }
+        // PDF 里只复制选中的字（PDF 的文字只读，剪切也只复制）。
+        if self.pdf_focused() {
+            if let Some(text) = self.pdf_selected_text() {
+                self.set_clipboard(text, false);
+                self.flash(t!("editor-selection-copied"));
+            }
+            return;
+        }
         // 预览里只复制选中的字（预览只读，剪切也只复制）。
         if self.markdown_focused() {
             if let Some(text) = self.markdown_selected_text() {

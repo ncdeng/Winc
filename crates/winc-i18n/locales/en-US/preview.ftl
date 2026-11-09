@@ -106,3 +106,7 @@ preview-pdf-empty = The PDF has no pages
 preview-pdf-render-failed = The page couldn’t be rendered
 preview-pdf-annotate-failed = The annotation couldn’t be changed
 preview-pdf-save-failed = The annotations couldn’t be saved to the PDF
+preview-pdf-saved = Annotations saved to the PDF
+preview-pdf-comment-title = Comment
+preview-pdf-comment-placeholder = What should change here
+preview-pdf-comment-hint = Return to save to the PDF, Esc to cancel

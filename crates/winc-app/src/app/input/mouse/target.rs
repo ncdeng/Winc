@@ -56,6 +56,14 @@ impl App {
             Target::MarkdownLink(link) => Hover::MarkdownLink(link),
             Target::MarkdownToc(target) => Hover::MarkdownToc(target),
             Target::MarkdownText => Hover::None,
+            Target::PdfText => self
+                .pdf
+                .note_at(x, y)
+                .filter(|&(page, i)| {
+                    let note = self.pdf.texts.get(&page).and_then(|t| t.notes.get(i));
+                    note.is_some_and(|n| !n.comment.trim().is_empty())
+                })
+                .map_or(Hover::None, |(page, i)| Hover::PdfNote(page, i)),
             Target::Tab(index, on_close) => Hover::Tab(index, on_close),
             Target::RulerChange(hunk) => Hover::RulerChange(hunk),
             Target::Crumb(index) => Hover::Crumb(index),
@@ -298,6 +306,10 @@ impl App {
         if self.markdown.area.contains(x, y) {
             return Target::MarkdownText;
         }
+        // PDF 上按下：选字，并拿到焦点（便于用键盘滚动和复制）。
+        if self.pdf.area.contains(x, y) {
+            return Target::PdfText;
+        }
         if l.editor.contains(x, y) && self.editor.active.is_some() {
             return Target::Editor;
         }
@@ -516,8 +528,12 @@ impl App {
             || self.over_diff_text(x, y) && x < self.layout.editor.right() - SCROLLBAR_HIT;
         // 日志详情里能选的字上（不是能点的提交号、文件）：文字光标。
         let in_field = self.field_at(x, y).is_some()
-            || matches!(self.drag, Drag::LogText | Drag::MarkdownText)
+            || matches!(
+                self.drag,
+                Drag::LogText | Drag::MarkdownText | Drag::PdfText
+            )
             || (self.markdown.area.contains(x, y) && self.markdown_link_at(x, y).is_none())
+            || self.pdf.text_at(x, y)
             || (self.log_active()
                 && crate::layout::hit(&self.log.hits, x, y).is_none()
                 && self.log_text_at(x, y, false).is_some());
@@ -622,6 +638,8 @@ pub(super) enum Target {
     MarkdownToc(crate::app::preview::markdown::TocTarget),
     /// Markdown 预览上不是链接的地方：选字。
     MarkdownText,
+    /// PDF 预览：选字；悬停在带注释的批注上时显示注释。
+    PdfText,
     /// 标签，参数为标签下标和在关闭按钮上。
     Tab(usize, bool),
     /// 概览标尺上的改动，参数为改动块的序号。

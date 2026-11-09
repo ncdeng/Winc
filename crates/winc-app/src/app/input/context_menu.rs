@@ -305,6 +305,18 @@ pub enum MenuCommand {
     SelectAll,
     /// Markdown 预览：把光标放到右键点中的字在原文中的位置，切回文字（只看预览时改为分栏）。
     RevealSource,
+    /// PDF：给选中的字加高亮。
+    PdfHighlight,
+    /// PDF：给选中的字加下划线。
+    PdfUnderline,
+    /// PDF：给选中的字加删除线。
+    PdfStrikeOut,
+    /// PDF：给选中的字加高亮并写注释。
+    PdfComment,
+    /// PDF：改写右键点中的批注的注释。
+    PdfEditNote,
+    /// PDF：删除右键点中的批注。
+    PdfRemoveNote,
     /// 终端：查找。
     TerminalFind,
     /// 终端：清屏和回滚缓冲。
@@ -431,6 +443,12 @@ impl MenuCommand {
             MenuCommand::TreeLocate => t!("menu-tree-locate"),
             MenuCommand::SelectAll => t!("cmd-select-all"),
             MenuCommand::RevealSource => t!("menu-reveal-source"),
+            MenuCommand::PdfHighlight => t!("menu-pdf-highlight"),
+            MenuCommand::PdfUnderline => t!("menu-pdf-underline"),
+            MenuCommand::PdfStrikeOut => t!("menu-pdf-strikeout"),
+            MenuCommand::PdfComment => t!("menu-pdf-comment"),
+            MenuCommand::PdfEditNote => t!("menu-pdf-edit-note"),
+            MenuCommand::PdfRemoveNote => t!("menu-pdf-remove-note"),
             MenuCommand::TerminalFind => t!("cmd-find"),
             MenuCommand::TerminalClear => t!("menu-terminal-clear"),
             MenuCommand::TerminalMaximize => t!("menu-terminal-maximize"),
@@ -593,6 +611,8 @@ pub enum MenuTarget {
     Editor(DocumentId),
     /// Markdown 预览（分栏右边，或只看预览时整个编辑区）。
     Markdown,
+    /// PDF 预览（能选字时）。
+    Pdf,
     /// 差异标签里的文字：`true` 是右侧（工作区，可以编辑），`false` 是左侧。
     Diff(DocumentId, bool),
     /// 侧栏顶部的项目名。

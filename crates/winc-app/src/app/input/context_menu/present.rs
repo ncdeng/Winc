@@ -164,6 +164,8 @@ impl App {
             MenuTarget::Terminal(block)
         } else if self.markdown_context_target(x, y) {
             MenuTarget::Markdown
+        } else if self.pdf_context_target(x, y) {
+            MenuTarget::Pdf
         } else if let Some(id) = self.editor_context_target(x, y) {
             MenuTarget::Editor(id)
         } else {
@@ -447,6 +449,26 @@ impl App {
                 }
                 menu
             }
+            MenuTarget::Pdf => {
+                let marked = self.pdf_can_mark();
+                let mut menu = vec![
+                    MenuEntry::Item(MenuCommand::Copy, self.pdf_selected_text().is_some()),
+                    MenuEntry::Separator,
+                    MenuEntry::Item(MenuCommand::PdfHighlight, marked),
+                    MenuEntry::Item(MenuCommand::PdfUnderline, marked),
+                    MenuEntry::Item(MenuCommand::PdfStrikeOut, marked),
+                    MenuEntry::Item(MenuCommand::PdfComment, marked),
+                ];
+                // 右键点在已有的批注上：可以改写注释、删除批注。
+                if self.pdf.menu_note.is_some() {
+                    menu.extend([
+                        MenuEntry::Separator,
+                        MenuEntry::Item(MenuCommand::PdfEditNote, true),
+                        MenuEntry::Item(MenuCommand::PdfRemoveNote, true),
+                    ]);
+                }
+                menu
+            }
             MenuTarget::TerminalTab(_) => vec![
                 MenuEntry::Item(MenuCommand::RenameTerminal, true),
                 MenuEntry::Separator,
@@ -635,7 +657,10 @@ impl App {
         // 菜单上显示的快捷键按菜单弹出的位置取：文件树中取文件树的键位，编辑区中取编辑区的键位。
         let context = match &target {
             MenuTarget::Tree(_) => Context::Tree,
-            MenuTarget::Editor(_) | MenuTarget::Diff(..) | MenuTarget::Markdown => Context::Editor,
+            MenuTarget::Editor(_)
+            | MenuTarget::Diff(..)
+            | MenuTarget::Markdown
+            | MenuTarget::Pdf => Context::Editor,
             MenuTarget::Terminal(_) | MenuTarget::TerminalTab(_) => Context::Terminal,
             MenuTarget::SearchResult(..) => Context::Panel,
             _ => Context::Other,

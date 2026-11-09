@@ -292,6 +292,15 @@ fn draw_tooltip(app: &App, frame: &mut Frame<'_>) {
     let (button, label): (Rect, String) = match workspace::panel::tooltip(app) {
         Some(tip) => tip,
         None => match app.hover {
+            // PDF 批注的注释：贴着鼠标显示，批注的区域可能很大。
+            Hover::PdfNote(page, i) => {
+                let note = app.pdf.texts.get(&page).and_then(|t| t.notes.get(i));
+                let Some(note) = note.filter(|n| !n.comment.trim().is_empty()) else {
+                    return;
+                };
+                let (mx, my) = app.mouse();
+                (Rect::new(mx, my + 6.0, 0.0, 0.0), note.comment.clone())
+            }
             Hover::Search(button) => (
                 SearchParts::new(app.layout.search).rect(button),
                 button.label(),

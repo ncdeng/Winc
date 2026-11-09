@@ -82,6 +82,19 @@ impl App {
                 }
                 _ => {}
             },
+            MenuTarget::Pdf => {
+                use winc_preview::pdf::AnnotationKind;
+                match command {
+                    MenuCommand::Copy => self.copy(false),
+                    MenuCommand::PdfHighlight => self.pdf_mark(AnnotationKind::Highlight),
+                    MenuCommand::PdfUnderline => self.pdf_mark(AnnotationKind::Underline),
+                    MenuCommand::PdfStrikeOut => self.pdf_mark(AnnotationKind::StrikeOut),
+                    MenuCommand::PdfComment => self.pdf_comment_selection(),
+                    MenuCommand::PdfEditNote => self.pdf_edit_note(),
+                    MenuCommand::PdfRemoveNote => self.pdf_remove_note(),
+                    _ => {}
+                }
+            }
             MenuTarget::Terminal(block) => self.run_terminal_command(command, block),
             MenuTarget::TerminalTab(id) => {
                 let Some(index) = self.terminal.tabs.iter().position(|t| t.id == id) else {

@@ -1,9 +1,11 @@
 //! PDF 预览的绘制：各页从上到下居中排列，按显示宽度渲染，位图与物理像素一一对应。
 //!
 //! 页面宽度适应编辑区，最宽不超过 [`MAX_PAGE_WIDTH`]；只请求视口内和视口上下各一屏范围内的页
-//! （见 `App::request_pdf_pages`），尚未渲染完成的页先显示白色底。右下角显示当前页号和总页数。
+//! （见 `App::request_pdf_pages`），尚未渲染完成的页先显示白色底（文件刚被修改时显示旧的位图）。
+//! 选中的字逐行画一层半透明的蓝色；批注由 PDF 引擎画在位图里。右下角显示当前页号和总页数。
 
-use winc_render::{FontKind, Frame, Rect};
+use winc_preview::pdf::PageRect;
+use winc_render::{Color, FontKind, Frame, Rect};
 
 use crate::app::App;
 use crate::theme::RADIUS_POPUP;
@@ -44,6 +46,7 @@ pub(in crate::view) fn draw(app: &mut App, frame: &mut Frame<'_>, area: Rect) {
     };
     let (rects, height) = page_rects(&pages, area.w);
     app.pdf.height = height;
+    app.pdf.page_rects.clone_from(&rects);
     app.pdf.scroll = app.pdf.scroll.clamp(0.0, app.pdf.max_scroll());
     let scroll = app.pdf.scroll;
     let scale = frame.scale();
@@ -79,17 +82,66 @@ pub(in crate::view) fn draw(app: &mut App, frame: &mut Frame<'_>, area: Rect) {
         // 页面四周一圈细边框与背景区分，裁剪到预览区域内：滚出顶部的页不画到标签栏上。
         frame.rect_clipped(page.inset(-1.0, -1.0), p.border, 0.0, area);
         frame.rect_clipped(page, winc_render::Color::hex(0xffffff), 0.0, area);
-        if let Some(pixels) = app
-            .pdf
-            .rendered
-            .get(&i)
-            .filter(|px| px.width == w && px.height == h)
-        {
+        let fits =
+            |px: &&std::sync::Arc<winc_preview::image::Pixels>| px.width == w && px.height == h;
+        let shown =
+            (app.pdf.rendered.get(&i).filter(fits)).or_else(|| app.pdf.stale.get(&i).filter(fits));
+        if let Some(pixels) = shown {
             frame.pixels((page.x, page.y), w, h, &pixels.rgba, area);
         }
+        draw_selection(app, frame, i, page, area);
     }
     app.request_pdf_pages(&wanted);
     draw_page_number(app, frame, area, current, pages.len());
+}
+
+/// 选中的字上的底色：PDF 页面在两种主题下都是白底，颜色不随主题变化。
+const SELECTION: u32 = 0x2563EB;
+
+/// 在第 `index` 页（窗口中的位置为 `page`）上画选中的字：同一行相邻的字合成一个矩形，避免
+/// 半透明的底色在字与字之间叠出深浅。
+fn draw_selection(app: &App, frame: &mut Frame<'_>, index: usize, page: Rect, area: Rect) {
+    let Some(range) = app.pdf.selected_on(index) else {
+        return;
+    };
+    let Some(text) = app.pdf.texts.get(&index) else {
+        return;
+    };
+    let end = range.end.min(text.chars.len());
+    let boxes = text.chars[range.start.min(end)..end]
+        .iter()
+        .filter_map(|c| c.rect);
+    let color = Color::hex(SELECTION).alpha(0.28);
+    for line in merge_lines(boxes) {
+        let rect = Rect::new(
+            page.x + line.left * page.w,
+            page.y + line.top * page.h,
+            (line.right - line.left) * page.w,
+            (line.bottom - line.top) * page.h,
+        );
+        frame.rect_clipped(rect, color, 0.0, area);
+    }
+}
+
+/// 把逐字的外框（显示坐标）合并成逐行的矩形：与当前行在竖直方向上重叠一半以上的字并入该行，
+/// 否则另起一行。
+fn merge_lines(boxes: impl Iterator<Item = PageRect>) -> Vec<PageRect> {
+    let mut lines: Vec<PageRect> = Vec::new();
+    for b in boxes {
+        if let Some(line) = lines.last_mut() {
+            let overlap = line.bottom.min(b.bottom) - line.top.max(b.top);
+            let height = (b.bottom - b.top).min(line.bottom - line.top);
+            if height > 0.0 && overlap >= height * 0.5 {
+                line.left = line.left.min(b.left);
+                line.right = line.right.max(b.right);
+                line.top = line.top.min(b.top);
+                line.bottom = line.bottom.max(b.bottom);
+                continue;
+            }
+        }
+        lines.push(b);
+    }
+    lines
 }
 
 /// 在右下角画「当前页 / 总页数」：当前页是视口中线所在的页。

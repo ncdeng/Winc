@@ -276,6 +276,9 @@ impl App {
                 DiskBack::Checked(metadata) => {
                     match doc.check_disk_with(metadata.as_ref()) {
                         DiskSync::Reread(reread) => rereads.push((id, reread)),
+                        // PDF 预览刚把批注保存进这个文件：不是别人改的，不提示重新加载。
+                        DiskSync::Done(DiskChange::Reloaded)
+                            if self.pdf.wrote(doc.disk_mtime()) => {}
                         DiskSync::Done(DiskChange::Reloaded) => {
                             report.reloaded.push(doc.name().into_owned());
                         }

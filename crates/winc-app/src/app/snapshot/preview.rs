@@ -3193,3 +3193,124 @@ fn shoot_pdf() {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+/// PDF 第 `page` 页第 `i` 个字的中心（窗口坐标），按上一帧的排版换算。
+#[cfg(windows)]
+fn pdf_char_center(app: &App, page: usize, i: usize) -> (f32, f32) {
+    let r = app.pdf.page_rects[page];
+    let (x, y) = (app.pdf.area.x + r.x, app.pdf.area.y + r.y - app.pdf.scroll);
+    let c = app.pdf.texts[&page].chars[i].rect.unwrap();
+    (
+        x + (c.left + c.right) / 2.0 * r.w,
+        y + (c.top + c.bottom) / 2.0 * r.h,
+    )
+}
+
+/// 反复绘制、收取渲染线程的结果，直到 `done` 成立（最多约 5 秒）。
+#[cfg(windows)]
+fn pdf_until(app: &mut App, done: impl Fn(&App) -> bool) {
+    for _ in 0..250 {
+        paint(app);
+        app.wait_for_pdf();
+        app.poll_pdf();
+        if done(app) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    panic!("等待 PDF 超时");
+}
+
+/// 有 PDFium 时 PDF 能选字、复制，右键给选中的字加带注释的高亮并保存进文件；悬停显示注释，
+/// 右键可以删除批注。没有 PDFium 时跳过（设置了 `WINC_PDFIUM` 却没有加载成功时失败）。
+#[cfg(windows)]
+#[test]
+fn pdf_text_can_be_selected_annotated_and_saved() {
+    use crate::app::input::context_menu::MenuCommand;
+    use winc_preview::pdf::AnnotationKind;
+
+    let dir = sample_folder("pdf-annotate");
+    let path = dir.join("论文.pdf");
+    std::fs::write(&path, sample_pdf(2)).unwrap();
+    let mut app = open_pdf(&path, false);
+    if !app.pdf.editable {
+        assert!(
+            std::env::var_os("WINC_PDFIUM").is_none(),
+            "WINC_PDFIUM 指定的 PDFium 无法加载"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    }
+    pdf_until(&mut app, |app| app.pdf.texts.contains_key(&0));
+    let text: String = app.pdf.texts[&0].chars.iter().map(|c| c.ch).collect();
+    let start = text.find("Page 1").unwrap();
+    let (first, last) = (start, start + "Page 1".len() - 1);
+
+    // 从 `P` 的左半边拖到 `1` 的右半边：选中「Page 1」。
+    let (x0, y0) = pdf_char_center(&app, 0, first);
+    let (x1, y1) = pdf_char_center(&app, 0, last);
+    app.on_mouse_move(x0 - 4.0, y0);
+    app.on_mouse_down(MouseButton::Left);
+    app.on_mouse_move(x1 + 4.0, y1);
+    app.on_mouse_up(MouseButton::Left);
+    assert_eq!(app.pdf_selected_text().as_deref(), Some("Page 1"));
+    app.copy(false);
+    assert_eq!(app.copied.as_deref(), Some("Page 1"));
+
+    // 右键选中的字：可以加高亮、下划线、删除线和带注释的高亮。
+    right_click(&mut app, ((x0 + x1) / 2.0, y0));
+    let commands = menu_commands(&app);
+    for command in [
+        MenuCommand::Copy,
+        MenuCommand::PdfHighlight,
+        MenuCommand::PdfUnderline,
+        MenuCommand::PdfStrikeOut,
+        MenuCommand::PdfComment,
+    ] {
+        assert!(commands.contains(&(command, true)), "{commands:?}");
+    }
+    assert!(
+        !commands
+            .iter()
+            .any(|(c, _)| *c == MenuCommand::PdfRemoveNote)
+    );
+    app.run_menu_command(MenuCommand::PdfComment);
+    assert_eq!(app.prompt_kind, crate::app::PromptKind::PdfComment);
+    app.goto_input.as_mut().unwrap().set_text("改成 Chapter 1");
+    app.submit_prompt();
+    pdf_until(&mut app, |app| {
+        app.pdf.texts.get(&0).is_some_and(|t| !t.notes.is_empty())
+    });
+    let note = &app.pdf.texts[&0].notes[0];
+    assert_eq!(note.kind, AnnotationKind::Highlight);
+    assert_eq!(note.comment, "改成 Chapter 1");
+    assert!(app.pdf.selection.is_none());
+
+    // 批注已经写进文件：另外打开也能读到。
+    let saved = winc_preview::pdf::Document::open(&path).unwrap();
+    let notes = saved.annotations(0).unwrap();
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0].comment, "改成 Chapter 1");
+    drop(saved);
+    let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+    assert!(app.pdf.wrote(mtime));
+
+    // 悬停在批注上显示注释；右键批注可以删除它。
+    app.on_mouse_move(x0, y0);
+    assert_eq!(app.hover, crate::app::Hover::PdfNote(0, 0));
+    right_click(&mut app, (x0, y0));
+    let commands = menu_commands(&app);
+    assert!(
+        commands.contains(&(MenuCommand::PdfRemoveNote, true)),
+        "{commands:?}"
+    );
+    app.run_menu_command(MenuCommand::PdfRemoveNote);
+    pdf_until(&mut app, |app| {
+        app.pdf.texts.get(&0).is_some_and(|t| t.notes.is_empty())
+    });
+    let saved = winc_preview::pdf::Document::open(&path).unwrap();
+    assert!(saved.annotations(0).unwrap().is_empty());
+    drop(saved);
+    drop(app);
+    let _ = std::fs::remove_dir_all(&dir);
+}

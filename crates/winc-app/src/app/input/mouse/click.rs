@@ -146,6 +146,11 @@ impl App {
             target,
             Target::MarkdownText | Target::Scrollbar(Scrollbar::Markdown, _)
         );
+        // PDF 同理：点在 PDF 以外时选区和焦点不要了（`click_pdf` 再拿回来）。
+        if !matches!(target, Target::PdfText) && self.pdf.focused {
+            self.pdf.focused = false;
+            self.pdf.selection = None;
+        }
         if !keeps_preview && self.markdown.focused {
             self.markdown.focused = false;
             self.markdown.selection = None;
@@ -205,6 +210,7 @@ impl App {
             Target::MarkdownLink(link) => self.open_markdown_link(link),
             Target::MarkdownToc(target) => self.press_toc(target),
             Target::MarkdownText => self.click_markdown(x, y),
+            Target::PdfText => self.click_pdf(x, y),
             Target::Tab(index, true) => {
                 self.close_pressed = self.editor.documents.get(index).map(|d| d.id);
             }

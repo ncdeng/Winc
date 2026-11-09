@@ -473,7 +473,7 @@ impl App {
     }
 
     /// 打开 `kind` 的输入条，输入框为 `field`，焦点移到输入条上；文件树中正在输入的名字先结束。
-    fn open_prompt(&mut self, kind: PromptKind, field: TextField) {
+    pub(in crate::app) fn open_prompt(&mut self, kind: PromptKind, field: TextField) {
         self.finish_name_input();
         self.goto_input = Some(field);
         self.prompt_kind = kind;
@@ -509,6 +509,7 @@ impl App {
             PromptKind::Stash => self.git_stash(&input),
             PromptKind::NewTag { at } => self.git_new_tag(&input, at),
             PromptKind::RenameBranch { old } => self.git_rename_branch(old, &input),
+            PromptKind::PdfComment => self.pdf_submit_comment(&input),
         }
         self.relayout();
         self.request_redraw();
