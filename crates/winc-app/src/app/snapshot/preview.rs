@@ -3275,7 +3275,10 @@ fn pdf_text_can_be_selected_annotated_and_saved() {
             .any(|(c, _)| *c == MenuCommand::PdfRemoveNote)
     );
     app.run_menu_command(MenuCommand::PdfComment);
-    assert_eq!(app.prompt_kind, crate::app::PromptKind::PdfComment);
+    assert!(matches!(
+        app.prompt_kind,
+        crate::app::PromptKind::PdfComment(_)
+    ));
     // 长批注折行显示：输入条随行数增高，写过的字都看得见；最多显示 `NOTE_LINES` 行，再多在
     // 输入条里滚动。批注里可以换行。
     paint(&mut app);
@@ -3309,8 +3312,13 @@ fn pdf_text_can_be_selected_annotated_and_saved() {
     assert_eq!(notes.len(), 1);
     assert_eq!(notes[0].comment, "改成 Chapter 1");
     drop(saved);
-    let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
-    assert!(app.pdf.wrote(mtime));
+    // 文档记下了自己写出后的修改时间：检查磁盘时不当作外部修改，不重新打开、不提示。
+    let metadata = std::fs::metadata(&path).unwrap();
+    let doc = app.editor.active_mut().unwrap();
+    assert!(matches!(
+        doc.check_disk_with(Some(&metadata)),
+        winc_editor::DiskSync::Done(winc_editor::DiskChange::Unchanged)
+    ));
 
     // 悬停在批注上显示注释；右键批注可以删除它。
     app.on_mouse_move(x0, y0);
@@ -3421,88 +3429,4 @@ fn shoot_pdf_comment() {
     );
     shoot(&mut app, "pdf-comment");
     let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// 截图：在一份真实的 PDF（`WINC_PDF_SHOT` 指定，复制到临时目录后打开，原文件不动）上选字、
-/// 右键（`pdf-1-menu`），写一段长批注（`pdf-2-comment`），加上高亮、下划线、删除线后悬停查看
-/// 注释（`pdf-3-notes`）。需要 `WINC_PDFIUM`。
-#[cfg(windows)]
-#[test]
-#[ignore = "截图，手动运行"]
-fn shoot_pdf_annotating() {
-    use crate::app::input::context_menu::MenuCommand;
-
-    let source = std::path::PathBuf::from(std::env::var_os("WINC_PDF_SHOT").unwrap());
-    let root = std::env::temp_dir().join(format!("winc-pdf-shot-{}", std::process::id()));
-    // 截图里的工作区名就是这个目录名。
-    let dir = root.join("我的论文");
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join(source.file_name().unwrap());
-    std::fs::copy(&source, &path).unwrap();
-    let mut app = open_pdf(&path, false);
-    assert!(app.pdf.editable, "需要 WINC_PDFIUM");
-    pdf_until(&mut app, |app| app.pdf.texts.contains_key(&0));
-    // 第 0 页文字中 `phrase` 的第一个字和最后一个字的序号。
-    let span = |app: &App, phrase: &str| {
-        let text: String = app.pdf.texts[&0].chars.iter().map(|c| c.ch).collect();
-        let byte = text.find(phrase).unwrap();
-        let start = text[..byte].chars().count();
-        (start, start + phrase.chars().count() - 1)
-    };
-    let select = |app: &mut App, phrase: &str| {
-        let (first, last) = span(app, phrase);
-        let (x0, y0) = pdf_char_center(app, 0, first);
-        let (x1, y1) = pdf_char_center(app, 0, last);
-        app.on_mouse_move(x0 - 3.0, y0);
-        app.on_mouse_down(MouseButton::Left);
-        app.on_mouse_move(x1 + 3.0, y1);
-        app.on_mouse_up(MouseButton::Left);
-        (x0, x1, y0)
-    };
-    let mark = |app: &mut App, phrase: &str, command: MenuCommand| {
-        let (x0, x1, y) = select(app, phrase);
-        right_click(app, ((x0 + x1) / 2.0, y));
-        app.run_menu_command(command);
-        app.context_menu = None;
-        let count = app.pdf.texts.get(&0).map_or(0, |t| t.notes.len());
-        pdf_until(app, |app| {
-            app.pdf.texts.get(&0).is_some_and(|t| t.notes.len() > count)
-        });
-    };
-
-    let (x0, x1, y) = select(&mut app, "拖动鼠标选中需要修改的文字");
-    right_click(&mut app, ((x0 + x1) / 2.0, y));
-    paint(&mut app);
-    let row = app.popup().unwrap().levels[0].row_rects[2];
-    app.on_mouse_move(row.x + 40.0, row.y + row.h / 2.0);
-    shoot(&mut app, "pdf-1-menu");
-
-    app.run_menu_command(MenuCommand::PdfComment);
-    app.context_menu = None;
-    let comment = "这句有点绕，拆成两句：先说怎么选中文字，再说怎么加高亮和批注。\
-                   “需要修改的文字”跟第二步重复了，改成“要改的地方”。\n\
-                   图 1 也把这三步画出来。";
-    let field = app.goto_input.as_mut().unwrap();
-    field.set_text(comment);
-    field.set_caret(comment.len(), false);
-    shoot(&mut app, "pdf-2-comment");
-    app.submit_prompt();
-    pdf_until(&mut app, |app| {
-        app.pdf.texts.get(&0).is_some_and(|t| !t.notes.is_empty())
-    });
-
-    mark(
-        &mut app,
-        "源文件与最终版面是分开的",
-        MenuCommand::PdfUnderline,
-    );
-    mark(&mut app, "往往需要先记在别处，", MenuCommand::PdfStrikeOut);
-    app.pdf.selection = None;
-    let (first, last) = span(&app, "拖动鼠标选中需要修改的文字");
-    let (x0, y0) = pdf_char_center(&app, 0, first);
-    let (x1, _) = pdf_char_center(&app, 0, last);
-    app.on_mouse_move((x0 + x1) / 2.0, y0);
-    app.tooltip_since = Some(Instant::now() - TOOLTIP_DELAY);
-    shoot(&mut app, "pdf-3-notes");
-    let _ = std::fs::remove_dir_all(&root);
 }

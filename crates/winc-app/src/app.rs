@@ -291,8 +291,8 @@ pub enum PromptKind {
     NewTag { at: String },
     /// 分支的新名字；`old` 是现在的名字。
     RenameBranch { old: String },
-    /// PDF 批注的注释文字（给选中的字加带注释的高亮，或改写已有批注的注释）。
-    PdfComment,
+    /// PDF 批注的注释文字：给选中的字加带注释的高亮，或改写已有批注的注释。
+    PdfComment(preview::pdf::Pending),
 }
 
 /// 键盘焦点所在的区域。

@@ -483,12 +483,12 @@ impl App {
         self.request_redraw();
     }
 
-    /// 输入条的位置：写 PDF 批注时是会折行的宽输入条（见 [`crate::layout::note_bar`]，行数取上一帧
-    /// 折出的行数），其余是跳转条。
+    /// 输入条的位置：多行输入（PDF 批注）时是会折行的宽输入条（见 [`crate::layout::note_bar`]，
+    /// 行数取上一帧折出的行数），其余是跳转条。
     pub(crate) fn prompt_bar(&self) -> Rect {
         let editor = self.layout.editor;
-        match (&self.prompt_kind, &self.goto_input) {
-            (PromptKind::PdfComment, Some(field)) => {
+        match &self.goto_input {
+            Some(field) if field.is_multiline() => {
                 let lines = field.view.rows.last().map_or(1, |row| row + 1);
                 crate::layout::note_bar(editor, lines)
             }
@@ -522,7 +522,7 @@ impl App {
             PromptKind::Stash => self.git_stash(&input),
             PromptKind::NewTag { at } => self.git_new_tag(&input, at),
             PromptKind::RenameBranch { old } => self.git_rename_branch(old, &input),
-            PromptKind::PdfComment => self.pdf_submit_comment(&input),
+            PromptKind::PdfComment(pending) => self.pdf_submit_comment(pending, &input),
         }
         self.relayout();
         self.request_redraw();

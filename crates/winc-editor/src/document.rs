@@ -998,6 +998,12 @@ impl Document {
         self.disk_mtime
     }
 
+    /// 文件由本程序以别的方式写出后（PDF 预览把批注保存进文件），记下写出后的修改时间：之后检查
+    /// 磁盘时认得这次写入，不当作被其他程序修改。
+    pub fn adopt_disk_mtime(&mut self, mtime: SystemTime) {
+        self.disk_mtime = Some(mtime);
+    }
+
     /// 恢复备份中上次未保存的内容，返回备份写入后磁盘文件是否被外部修改；无法恢复时返回 `None`。
     ///
     /// 调用前文档应已按磁盘上当前的内容打开。恢复时把内容换成 `text`，算一次修改，⌘Z 回到磁盘上

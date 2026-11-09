@@ -246,15 +246,15 @@ pub(super) fn draw_goto(app: &mut App, frame: &mut Frame<'_>) {
                     commit = crate::app::git::log::short(at)
                 ),
             ),
-            crate::app::PromptKind::PdfComment => (
+            crate::app::PromptKind::PdfComment(_) => (
                 t!("preview-pdf-comment-title"),
                 t!("preview-pdf-comment-placeholder"),
                 t!("preview-pdf-comment-hint").to_owned(),
             ),
         };
         let focused = app.focus == Focus::Prompt;
-        // PDF 批注可能很长：用更宽的输入条，文字折行，输入条随行数增高。
-        let note = matches!(app.prompt_kind, crate::app::PromptKind::PdfComment);
+        // 多行输入（PDF 批注）可能很长：用更宽的输入条，文字折行，输入条随行数增高。
+        let note = field.is_multiline();
         let editor = app.layout.editor;
         let head = if note {
             note_bar(editor, 1)

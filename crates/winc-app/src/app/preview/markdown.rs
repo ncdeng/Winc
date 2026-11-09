@@ -1895,28 +1895,7 @@ impl App {
             .text(from, (at + REACH).min(laid.chars()))
             .chars()
             .collect();
-        let i = at - from;
-        let class = |c: char| {
-            if c.is_alphanumeric() && (c as u32) < 0x2E80 || c == '_' {
-                1
-            } else if c.is_alphanumeric() {
-                2
-            } else {
-                0
-            }
-        };
-        let kind = class(*text.get(i)?);
-        if kind == 0 {
-            return Some((at, at + 1));
-        }
-        let start = text[..i]
-            .iter()
-            .rposition(|&c| class(c) != kind)
-            .map_or(0, |p| p + 1);
-        let end = text[i..]
-            .iter()
-            .position(|&c| class(c) != kind)
-            .map_or(text.len(), |p| i + p);
+        let (start, end) = same_class_span(&text, at - from, word_class)?;
         Some((from + start, from + end))
     }
 
@@ -2138,6 +2117,40 @@ pub(crate) fn image_path(doc: Option<&Path>, url: &str, remote: bool) -> Option<
         });
     }
     local_target(doc?, url)
+}
+
+/// 双击选词时字的类别：连着的字母数字（中日韩文字以外，含 `_`）算一个词，连着的中日韩文字算
+/// 一个词；其他字（类别 0）单独成词。Markdown 预览和 PDF 共用。
+pub(in crate::app) fn word_class(c: char) -> u8 {
+    if c.is_alphanumeric() && (c as u32) < 0x2E80 || c == '_' {
+        1
+    } else if c.is_alphanumeric() {
+        2
+    } else {
+        0
+    }
+}
+
+/// `text` 中第 `i` 个字所在的一段同类字（类别由 `class` 给出）的起止序号；类别为 0 的字只取它
+/// 自己。`i` 越界时返回 `None`。
+pub(in crate::app) fn same_class_span(
+    text: &[char],
+    i: usize,
+    class: impl Fn(char) -> u8,
+) -> Option<(usize, usize)> {
+    let kind = class(*text.get(i)?);
+    if kind == 0 {
+        return Some((i, i + 1));
+    }
+    let start = text[..i]
+        .iter()
+        .rposition(|&c| class(c) != kind)
+        .map_or(0, |p| p + 1);
+    let end = text[i..]
+        .iter()
+        .position(|&c| class(c) != kind)
+        .map_or(text.len(), |p| i + p);
+    Some((start, end))
 }
 
 /// 缓存中的图片多久未使用时删除（30 天）、整个缓存最大多少字节，超过时从最久没用的删起。

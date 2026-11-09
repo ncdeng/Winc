@@ -116,6 +116,27 @@ impl PageRect {
     }
 }
 
+/// 把按阅读顺序排列的逐字外框合并成逐行的矩形：与当前行在竖直方向上重叠一半以上的字并入该行，
+/// 否则另起一行。界面上选区的底色和写进 PDF 的批注都按这个分行。
+pub fn merge_lines(boxes: impl IntoIterator<Item = PageRect>) -> Vec<PageRect> {
+    let mut lines: Vec<PageRect> = Vec::new();
+    for b in boxes {
+        if let Some(line) = lines.last_mut() {
+            let overlap = line.bottom.min(b.bottom) - line.top.max(b.top);
+            let height = (b.bottom - b.top).min(line.bottom - line.top);
+            if height > 0.0 && overlap >= height * 0.5 {
+                line.left = line.left.min(b.left);
+                line.right = line.right.max(b.right);
+                line.top = line.top.min(b.top);
+                line.bottom = line.bottom.max(b.bottom);
+                continue;
+            }
+        }
+        lines.push(b);
+    }
+    lines
+}
+
 /// 页面上的一个字。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TextChar {
@@ -184,19 +205,15 @@ impl Document {
     pub fn open(path: &Path) -> Result<Document, String> {
         #[cfg(any(target_os = "macos", windows))]
         {
+            let system = || platform::Document::open(path).map(|(d, p)| (Backend::System(d), p));
             #[cfg(windows)]
             let (inner, pages) = if pdfium::available() {
-                let (doc, pages) = pdfium::Document::open(path)?;
-                (Backend::Pdfium(doc), pages)
+                pdfium::Document::open(path).map(|(d, p)| (Backend::Pdfium(d), p))?
             } else {
-                let (doc, pages) = platform::Document::open(path)?;
-                (Backend::System(doc), pages)
+                system()?
             };
             #[cfg(not(windows))]
-            let (inner, pages) = {
-                let (doc, pages) = platform::Document::open(path)?;
-                (Backend::System(doc), pages)
-            };
+            let (inner, pages) = system()?;
             if pages.is_empty() {
                 return Err(winc_i18n::t!("preview-pdf-empty").to_owned());
             }
@@ -260,9 +277,6 @@ impl Document {
     ///
     /// 页号超出范围或页面无法读取时返回原因。
     pub fn text(&self, index: usize) -> Result<Vec<TextChar>, String> {
-        if index >= self.pages.len() {
-            return Err(winc_i18n::t!("preview-pdf-render-failed").to_owned());
-        }
         #[cfg(windows)]
         if let Backend::Pdfium(doc) = &self.inner {
             return doc.text(index);
@@ -276,9 +290,6 @@ impl Document {
     ///
     /// 页号超出范围或页面无法读取时返回原因。
     pub fn annotations(&self, index: usize) -> Result<Vec<Annotation>, String> {
-        if index >= self.pages.len() {
-            return Err(winc_i18n::t!("preview-pdf-render-failed").to_owned());
-        }
         #[cfg(windows)]
         if let Backend::Pdfium(doc) = &self.inner {
             return doc.annotations(index);
@@ -301,9 +312,6 @@ impl Document {
         chars: Range<usize>,
         comment: &str,
     ) -> Result<(), String> {
-        if index >= self.pages.len() {
-            return Err(winc_i18n::t!("preview-pdf-annotate-failed").to_owned());
-        }
         #[cfg(windows)]
         if let Backend::Pdfium(doc) = &mut self.inner {
             return doc.annotate(index, kind, chars, comment);
@@ -323,9 +331,6 @@ impl Document {
         annotation: usize,
         comment: &str,
     ) -> Result<(), String> {
-        if index >= self.pages.len() {
-            return Err(winc_i18n::t!("preview-pdf-annotate-failed").to_owned());
-        }
         #[cfg(windows)]
         if let Backend::Pdfium(doc) = &mut self.inner {
             return doc.set_comment(index, annotation, comment);
@@ -340,9 +345,6 @@ impl Document {
     ///
     /// 不能修改批注、批注不存在或 PDF 引擎失败时返回原因。
     pub fn remove_annotation(&mut self, index: usize, annotation: usize) -> Result<(), String> {
-        if index >= self.pages.len() {
-            return Err(winc_i18n::t!("preview-pdf-annotate-failed").to_owned());
-        }
         #[cfg(windows)]
         if let Backend::Pdfium(doc) = &mut self.inner {
             return doc.remove_annotation(index, annotation);

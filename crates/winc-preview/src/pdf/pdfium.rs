@@ -270,9 +270,6 @@ unsafe fn symbol<F: Copy>(lib: HMODULE, name: &CStr) -> Option<F> {
 /// 加载 PDFium 并初始化。
 fn load() -> Option<Api> {
     let path = library_path()?;
-    if !path.is_file() {
-        return None;
-    }
     let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
     // SAFETY: `wide` 是以 NUL 结尾的完整路径；按该路径的目录解析它依赖的动态库，不搜索当前目录。
     let lib = unsafe { LoadLibraryExW(PCWSTR(wide.as_ptr()), None, LOAD_WITH_ALTERED_SEARCH_PATH) }
@@ -374,55 +371,25 @@ impl Drop for Document {
     }
 }
 
-/// 加载的一页，离开作用域时关闭；只在持有 [`LOCK`] 时创建和丢弃。
-struct Page<'a> {
-    api: &'a Api,
-    page: Handle,
+/// PDFium 的一个句柄（页面、文字页、批注或位图），离开作用域时用 `close` 释放；只在持有
+/// [`LOCK`] 时创建和丢弃。
+struct Owned {
+    handle: Handle,
+    close: unsafe extern "system" fn(Handle),
 }
 
-impl Drop for Page<'_> {
-    fn drop(&mut self) {
-        // SAFETY: `page` 是 `FPDF_LoadPage` 返回的有效句柄，只关闭一次；调用方持有锁。
-        unsafe { (self.api.close_page)(self.page) };
+impl Owned {
+    /// 包装 `handle`，由 `close` 释放；PDFium 返回空指针（失败）时为 `None`。
+    fn new(handle: Handle, close: unsafe extern "system" fn(Handle)) -> Option<Owned> {
+        (!handle.is_null()).then_some(Owned { handle, close })
     }
 }
 
-/// 一页的文字信息，离开作用域时关闭；只在持有 [`LOCK`] 时创建和丢弃。
-struct TextPage<'a> {
-    api: &'a Api,
-    text: Handle,
-}
-
-impl Drop for TextPage<'_> {
+impl Drop for Owned {
     fn drop(&mut self) {
-        // SAFETY: `text` 是 `FPDFText_LoadPage` 返回的有效句柄，只关闭一次；调用方持有锁。
-        unsafe { (self.api.text_close_page)(self.text) };
-    }
-}
-
-/// 页面上的一个批注，离开作用域时释放句柄；只在持有 [`LOCK`] 时创建和丢弃。
-struct Annot<'a> {
-    api: &'a Api,
-    annot: Handle,
-}
-
-impl Drop for Annot<'_> {
-    fn drop(&mut self) {
-        // SAFETY: `annot` 是 `FPDFPage_GetAnnot` 或 `FPDFPage_CreateAnnot` 返回的有效句柄。
-        unsafe { (self.api.page_close_annot)(self.annot) };
-    }
-}
-
-/// 位图，离开作用域时销毁；只在持有 [`LOCK`] 时创建和丢弃。
-struct Bitmap<'a> {
-    api: &'a Api,
-    bitmap: Handle,
-}
-
-impl Drop for Bitmap<'_> {
-    fn drop(&mut self) {
-        // SAFETY: `bitmap` 是 `FPDFBitmap_CreateEx` 返回的有效句柄，只销毁一次。
-        unsafe { (self.api.bitmap_destroy)(self.bitmap) };
+        // SAFETY: `handle` 是与 `close` 配对的 PDFium 函数返回的有效句柄，只释放一次；调用方
+        // 持有锁。
+        unsafe { (self.close)(self.handle) };
     }
 }
 
@@ -481,33 +448,27 @@ impl Document {
     }
 
     /// 加载第 `index` 页；调用方持有锁。
-    fn page(&self, index: usize) -> Option<Page<'_>> {
+    fn page(&self, index: usize) -> Option<Owned> {
         let index = c_int::try_from(index).ok()?;
         // SAFETY: `doc` 是有效的文档句柄；页号越界时 PDFium 返回空指针。
         let page = unsafe { (self.api.load_page)(self.doc, index) };
-        (!page.is_null()).then_some(Page {
-            api: self.api,
-            page,
-        })
+        Owned::new(page, self.api.close_page)
     }
 
     /// 读取一页的文字信息；调用方持有锁。
-    fn text_page<'a>(&'a self, page: &Page<'a>) -> Option<TextPage<'a>> {
-        // SAFETY: `page.page` 是有效的页面句柄。
-        let text = unsafe { (self.api.text_load_page)(page.page) };
-        (!text.is_null()).then_some(TextPage {
-            api: self.api,
-            text,
-        })
+    fn text_page(&self, page: &Owned) -> Option<Owned> {
+        // SAFETY: `page` 是有效的页面句柄。
+        let text = unsafe { (self.api.text_load_page)(page.handle) };
+        Owned::new(text, self.api.text_close_page)
     }
 
     /// 页面空间中的点换成显示坐标（0 到 1）；调用方持有锁。
-    fn to_display(&self, page: &Page<'_>, x: f32, y: f32) -> (f32, f32) {
+    fn to_display(&self, page: &Owned, x: f32, y: f32) -> (f32, f32) {
         let (mut dx, mut dy) = (0, 0);
-        // SAFETY: `page.page` 是有效的页面句柄，输出参数可写。
+        // SAFETY: `page.handle` 是有效的页面句柄，输出参数可写。
         unsafe {
             (self.api.page_to_device)(
-                page.page,
+                page.handle,
                 0,
                 0,
                 DEVICE,
@@ -523,7 +484,7 @@ impl Document {
     }
 
     /// 页面空间中的矩形换成显示坐标；页面旋转时两个角的先后可能颠倒，取最小、最大值。
-    fn rect_to_display(&self, page: &Page<'_>, rect: RectF) -> PageRect {
+    fn rect_to_display(&self, page: &Owned, rect: RectF) -> PageRect {
         let (x1, y1) = self.to_display(page, rect.left, rect.top);
         let (x2, y2) = self.to_display(page, rect.right, rect.bottom);
         PageRect {
@@ -537,18 +498,18 @@ impl Document {
     /// 一页上的所有字，按 PDFium 的阅读顺序；调用方持有锁。
     ///
     /// PDFium 按 UTF-16 编号字符：数学字母（`𝑥` 等）由两个代理项组成，这里合成一个字。
-    fn chars(&self, text: &TextPage<'_>) -> Vec<RawChar> {
-        // SAFETY: `text.text` 是有效的文字页句柄。
-        let count = unsafe { (self.api.text_count_chars)(text.text) }.max(0);
+    fn chars(&self, text: &Owned) -> Vec<RawChar> {
+        // SAFETY: `text.handle` 是有效的文字页句柄。
+        let count = unsafe { (self.api.text_count_chars)(text.handle) }.max(0);
         let mut chars = Vec::with_capacity(count as usize);
         let mut i = 0;
         while i < count {
             // SAFETY: 编号在范围内。
-            let unit = unsafe { (self.api.text_get_unicode)(text.text, i) };
+            let unit = unsafe { (self.api.text_get_unicode)(text.handle, i) };
             let mut next = i + 1;
             let ch = if (0xD800..0xDC00).contains(&unit) && next < count {
                 // SAFETY: 编号在范围内。
-                let low = unsafe { (self.api.text_get_unicode)(text.text, next) };
+                let low = unsafe { (self.api.text_get_unicode)(text.handle, next) };
                 if (0xDC00..0xE000).contains(&low) {
                     next += 1;
                     char::from_u32(0x10000 + ((unit - 0xD800) << 10) + (low - 0xDC00))
@@ -560,10 +521,10 @@ impl Document {
             }
             .unwrap_or(char::REPLACEMENT_CHARACTER);
             // SAFETY: 编号在范围内。
-            let generated = unsafe { (self.api.text_is_generated)(text.text, i) } == 1;
+            let generated = unsafe { (self.api.text_is_generated)(text.handle, i) } == 1;
             let mut rect = RectF::default();
             // SAFETY: 编号在范围内，`rect` 是可写的输出参数。
-            let boxed = unsafe { (self.api.text_get_loose_char_box)(text.text, i, &mut rect) };
+            let boxed = unsafe { (self.api.text_get_loose_char_box)(text.handle, i, &mut rect) };
             let sized = rect.right > rect.left && rect.top > rect.bottom;
             let bounds = (boxed != 0 && sized && !generated && !ch.is_control()).then_some(rect);
             chars.push(RawChar { ch, bounds });
@@ -580,26 +541,12 @@ impl Document {
         );
         let _guard = lock();
         let page = self.page(index).ok_or_else(render_failed)?;
-        // SAFETY: 尺寸为正；传空指针由 PDFium 分配缓冲区。
-        let handle =
-            unsafe { (self.api.bitmap_create_ex)(w, h, BITMAP_BGRA, std::ptr::null_mut(), 0) };
-        if handle.is_null() {
-            return Err(render_failed());
-        }
-        let bitmap = Bitmap {
-            api: self.api,
-            bitmap: handle,
-        };
-        // SAFETY: `bitmap`、`page` 都是有效句柄；先铺不透明的白色底，再画页面和批注。
-        unsafe {
-            (self.api.bitmap_fill_rect)(bitmap.bitmap, 0, 0, w, h, 0xFFFF_FFFF);
-            (self.api.render_page_bitmap)(bitmap.bitmap, page.page, 0, 0, w, h, 0, RENDER_FLAGS);
-        }
+        let bitmap = self.draw(&page, w, h).ok_or_else(render_failed)?;
         // SAFETY: `bitmap` 是有效句柄。
         let (buffer, stride) = unsafe {
             (
-                (self.api.bitmap_get_buffer)(bitmap.bitmap),
-                (self.api.bitmap_get_stride)(bitmap.bitmap),
+                (self.api.bitmap_get_buffer)(bitmap.handle),
+                (self.api.bitmap_get_stride)(bitmap.handle),
             )
         };
         let row = width as usize * 4;
@@ -625,6 +572,21 @@ impl Document {
         })
     }
 
+    /// 把 `page` 画进一张新建的 `w × h` 像素位图：先铺不透明的白色底，再画页面和批注；调用方
+    /// 持有锁。
+    fn draw(&self, page: &Owned, w: c_int, h: c_int) -> Option<Owned> {
+        // SAFETY: 尺寸为正；传空指针由 PDFium 分配缓冲区。
+        let bitmap =
+            unsafe { (self.api.bitmap_create_ex)(w, h, BITMAP_BGRA, std::ptr::null_mut(), 0) };
+        let bitmap = Owned::new(bitmap, self.api.bitmap_destroy)?;
+        // SAFETY: `bitmap`、`page` 都是有效句柄。
+        unsafe {
+            (self.api.bitmap_fill_rect)(bitmap.handle, 0, 0, w, h, 0xFFFF_FFFF);
+            (self.api.render_page_bitmap)(bitmap.handle, page.handle, 0, 0, w, h, 0, RENDER_FLAGS);
+        }
+        Some(bitmap)
+    }
+
     /// 第 `index` 页的文字：每个字及其显示坐标中的外框。
     pub(super) fn text(&self, index: usize) -> Result<Vec<TextChar>, String> {
         let _guard = lock();
@@ -646,21 +608,17 @@ impl Document {
     pub(super) fn annotations(&self, index: usize) -> Result<Vec<Annotation>, String> {
         let _guard = lock();
         let page = self.page(index).ok_or_else(render_failed)?;
-        // SAFETY: `page.page` 是有效的页面句柄。
-        let count = unsafe { (self.api.page_get_annot_count)(page.page) }.max(0);
+        // SAFETY: `page.handle` 是有效的页面句柄。
+        let count = unsafe { (self.api.page_get_annot_count)(page.handle) }.max(0);
         let mut list = Vec::new();
         for i in 0..count {
             // SAFETY: 编号在范围内。
-            let handle = unsafe { (self.api.page_get_annot)(page.page, i) };
-            if handle.is_null() {
+            let annot = unsafe { (self.api.page_get_annot)(page.handle, i) };
+            let Some(annot) = Owned::new(annot, self.api.page_close_annot) else {
                 continue;
-            }
-            let annot = Annot {
-                api: self.api,
-                annot: handle,
             };
-            // SAFETY: `annot.annot` 是有效的批注句柄。
-            let subtype = unsafe { (self.api.annot_get_subtype)(annot.annot) };
+            // SAFETY: `annot.handle` 是有效的批注句柄。
+            let subtype = unsafe { (self.api.annot_get_subtype)(annot.handle) };
             let comment = self.string_value(&annot, c"Contents");
             let kind = match subtype {
                 SUBTYPE_HIGHLIGHT => AnnotationKind::Highlight,
@@ -682,7 +640,7 @@ impl Document {
             let (mut r, mut g, mut b, mut a) = (0, 0, 0, 0);
             // SAFETY: 输出参数可写。
             let colored = unsafe {
-                (self.api.annot_get_color)(annot.annot, COLOR, &mut r, &mut g, &mut b, &mut a)
+                (self.api.annot_get_color)(annot.handle, COLOR, &mut r, &mut g, &mut b, &mut a)
             } != 0;
             list.push(Annotation {
                 index: i as usize,
@@ -696,14 +654,14 @@ impl Document {
     }
 
     /// 批注占据的区域（显示坐标）：有四边形顶点的按各组顶点，否则按批注的外框。
-    fn annotation_rects(&self, page: &Page<'_>, annot: &Annot<'_>) -> Vec<PageRect> {
-        // SAFETY: `annot.annot` 是有效的批注句柄。
-        let quads = unsafe { (self.api.annot_count_attachment_points)(annot.annot) };
+    fn annotation_rects(&self, page: &Owned, annot: &Owned) -> Vec<PageRect> {
+        // SAFETY: `annot.handle` 是有效的批注句柄。
+        let quads = unsafe { (self.api.annot_count_attachment_points)(annot.handle) };
         let mut rects = Vec::new();
         for q in 0..quads {
             let mut p = QuadPoints::default();
             // SAFETY: 编号在范围内，`p` 是可写的输出参数。
-            if unsafe { (self.api.annot_get_attachment_points)(annot.annot, q, &mut p) } == 0 {
+            if unsafe { (self.api.annot_get_attachment_points)(annot.handle, q, &mut p) } == 0 {
                 continue;
             }
             let xs = [p.x1, p.x2, p.x3, p.x4];
@@ -719,7 +677,7 @@ impl Document {
         if rects.is_empty() {
             let mut rect = RectF::default();
             // SAFETY: `rect` 是可写的输出参数。
-            if unsafe { (self.api.annot_get_rect)(annot.annot, &mut rect) } != 0 {
+            if unsafe { (self.api.annot_get_rect)(annot.handle, &mut rect) } != 0 {
                 rects.push(self.rect_to_display(page, rect));
             }
         }
@@ -727,10 +685,10 @@ impl Document {
     }
 
     /// 读取批注字典中键为 `key` 的文字；没有时为空字符串。
-    fn string_value(&self, annot: &Annot<'_>, key: &CStr) -> String {
+    fn string_value(&self, annot: &Owned, key: &CStr) -> String {
         // SAFETY: 缓冲区为空时只返回所需的字节数（含结尾的 NUL）。
         let bytes = unsafe {
-            (self.api.annot_get_string_value)(annot.annot, key.as_ptr(), std::ptr::null_mut(), 0)
+            (self.api.annot_get_string_value)(annot.handle, key.as_ptr(), std::ptr::null_mut(), 0)
         };
         let units = (bytes as usize) / 2;
         if units <= 1 {
@@ -739,7 +697,12 @@ impl Document {
         let mut buffer = vec![0u16; units];
         // SAFETY: 缓冲区大小为 `bytes` 字节。
         unsafe {
-            (self.api.annot_get_string_value)(annot.annot, key.as_ptr(), buffer.as_mut_ptr(), bytes)
+            (self.api.annot_get_string_value)(
+                annot.handle,
+                key.as_ptr(),
+                buffer.as_mut_ptr(),
+                bytes,
+            )
         };
         while buffer.last() == Some(&0) {
             buffer.pop();
@@ -767,25 +730,33 @@ impl Document {
         let page = self.page(index).ok_or_else(annotate_failed)?;
         let text = self.text_page(&page).ok_or_else(annotate_failed)?;
         let all = self.chars(&text);
-        let boxes: Vec<RectF> = all
+        // 页面空间的 y 轴朝上：取反后按显示坐标的规则分行，再取反换回来。
+        let boxes = all
             .get(chars.start.min(all.len())..chars.end.min(all.len()))
             .unwrap_or_default()
             .iter()
             .filter_map(|c| c.bounds)
+            .map(|b| PageRect {
+                top: -b.top,
+                bottom: -b.bottom,
+                left: b.left,
+                right: b.right,
+            });
+        let lines: Vec<RectF> = super::merge_lines(boxes)
+            .into_iter()
+            .map(|l| RectF {
+                top: -l.top,
+                bottom: -l.bottom,
+                left: l.left,
+                right: l.right,
+            })
             .collect();
-        let lines = merge_lines(&boxes);
         if lines.is_empty() {
             return Err(annotate_failed());
         }
-        // SAFETY: `page.page` 是有效的页面句柄。
-        let handle = unsafe { (self.api.page_create_annot)(page.page, subtype) };
-        if handle.is_null() {
-            return Err(annotate_failed());
-        }
-        let annot = Annot {
-            api: self.api,
-            annot: handle,
-        };
+        // SAFETY: `page.handle` 是有效的页面句柄。
+        let annot = unsafe { (self.api.page_create_annot)(page.handle, subtype) };
+        let annot = Owned::new(annot, self.api.page_close_annot).ok_or_else(annotate_failed)?;
         let mut outer = lines[0];
         for line in &lines {
             let quad = QuadPoints {
@@ -799,7 +770,7 @@ impl Document {
                 y4: line.bottom,
             };
             // SAFETY: `quad` 是有效的输入参数。
-            if unsafe { (self.api.annot_append_attachment_points)(annot.annot, &quad) } == 0 {
+            if unsafe { (self.api.annot_append_attachment_points)(annot.handle, &quad) } == 0 {
                 return Err(annotate_failed());
             }
             outer.left = outer.left.min(line.left);
@@ -809,11 +780,11 @@ impl Document {
         }
         // SAFETY: 输入参数有效；字符串以 NUL 结尾。
         let ok = unsafe {
-            (self.api.annot_set_color)(annot.annot, COLOR, r, g, b, 255) != 0
-                && (self.api.annot_set_rect)(annot.annot, &outer) != 0
-                && (self.api.annot_set_flags)(annot.annot, FLAG_PRINT) != 0
+            (self.api.annot_set_color)(annot.handle, COLOR, r, g, b, 255) != 0
+                && (self.api.annot_set_rect)(annot.handle, &outer) != 0
+                && (self.api.annot_set_flags)(annot.handle, FLAG_PRINT) != 0
                 && (self.api.annot_set_string_value)(
-                    annot.annot,
+                    annot.handle,
                     c"T".as_ptr(),
                     wide("winc").as_ptr(),
                 ) != 0
@@ -832,29 +803,16 @@ impl Document {
     /// 让 PDFium 为 `page` 建立批注列表：这时 PDFium 把页面 `/Annots` 中直接写的批注字典
     /// （`FPDFPage_CreateAnnot` 就这样写）转成间接对象，规范要求批注是间接对象。把页面画进
     /// 1 × 1 像素的位图即可触发。保存时这些对象由 PDFium 写出，加密的文件也按加密规则写。
-    fn settle_annotations(&self, page: &Page<'_>) {
-        // SAFETY: 尺寸为正；传空指针由 PDFium 分配缓冲区。
-        let handle =
-            unsafe { (self.api.bitmap_create_ex)(1, 1, BITMAP_BGRA, std::ptr::null_mut(), 0) };
-        if handle.is_null() {
-            return;
-        }
-        let bitmap = Bitmap {
-            api: self.api,
-            bitmap: handle,
-        };
-        // SAFETY: `bitmap`、`page` 都是有效句柄。
-        unsafe {
-            (self.api.render_page_bitmap)(bitmap.bitmap, page.page, 0, 0, 1, 1, 0, RENDER_FLAGS);
-        }
+    fn settle_annotations(&self, page: &Owned) {
+        let _ = self.draw(page, 1, 1);
     }
 
     /// 写入批注的注释文字（`Contents`）。
-    fn set_contents(api: &Api, annot: &Annot<'_>, comment: &str) -> Result<(), String> {
+    fn set_contents(api: &Api, annot: &Owned, comment: &str) -> Result<(), String> {
         let text = wide(comment);
         // SAFETY: 键和值都以 NUL 结尾。
         let ok = unsafe {
-            (api.annot_set_string_value)(annot.annot, c"Contents".as_ptr(), text.as_ptr())
+            (api.annot_set_string_value)(annot.handle, c"Contents".as_ptr(), text.as_ptr())
         };
         if ok == 0 {
             return Err(annotate_failed());
@@ -872,15 +830,9 @@ impl Document {
         let _guard = lock();
         let page = self.page(index).ok_or_else(annotate_failed)?;
         let i = c_int::try_from(annotation).map_err(|_| annotate_failed())?;
-        // SAFETY: `page.page` 是有效的页面句柄；编号越界时 PDFium 返回空指针。
-        let handle = unsafe { (self.api.page_get_annot)(page.page, i) };
-        if handle.is_null() {
-            return Err(annotate_failed());
-        }
-        let annot = Annot {
-            api: self.api,
-            annot: handle,
-        };
+        // SAFETY: `page.handle` 是有效的页面句柄；编号越界时 PDFium 返回空指针。
+        let annot = unsafe { (self.api.page_get_annot)(page.handle, i) };
+        let annot = Owned::new(annot, self.api.page_close_annot).ok_or_else(annotate_failed)?;
         Self::set_contents(self.api, &annot, comment)?;
         drop(annot);
         self.settle_annotations(&page);
@@ -896,8 +848,8 @@ impl Document {
         let _guard = lock();
         let page = self.page(index).ok_or_else(annotate_failed)?;
         let i = c_int::try_from(annotation).map_err(|_| annotate_failed())?;
-        // SAFETY: `page.page` 是有效的页面句柄；编号越界时 PDFium 返回失败。
-        if unsafe { (self.api.page_remove_annot)(page.page, i) } == 0 {
+        // SAFETY: `page.handle` 是有效的页面句柄；编号越界时 PDFium 返回失败。
+        if unsafe { (self.api.page_remove_annot)(page.handle, i) } == 0 {
             return Err(annotate_failed());
         }
         Ok(())
@@ -936,27 +888,6 @@ impl Document {
         // 批注改成规范要求的间接对象，没有改动的对象不再重复写入（见 `indirect`）。
         Ok(indirect::tidy_incremental_save(&self.bytes, writer.out))
     }
-}
-
-/// 把逐字的外框（页面空间）合并成逐行的矩形：与当前行在竖直方向上重叠一半以上的字并入该行，
-/// 否则另起一行。字按阅读顺序排列，同一行的字相邻。
-fn merge_lines(boxes: &[RectF]) -> Vec<RectF> {
-    let mut lines: Vec<RectF> = Vec::new();
-    for b in boxes {
-        if let Some(line) = lines.last_mut() {
-            let overlap = line.top.min(b.top) - line.bottom.max(b.bottom);
-            let height = (b.top - b.bottom).min(line.top - line.bottom);
-            if height > 0.0 && overlap >= height * 0.5 {
-                line.left = line.left.min(b.left);
-                line.right = line.right.max(b.right);
-                line.top = line.top.max(b.top);
-                line.bottom = line.bottom.min(b.bottom);
-                continue;
-            }
-        }
-        lines.push(*b);
-    }
-    lines
 }
 
 mod indirect;

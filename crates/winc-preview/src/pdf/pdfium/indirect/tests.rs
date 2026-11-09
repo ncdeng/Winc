@@ -1,4 +1,4 @@
-//! `indirect` 的测试：手写 PDFium 风格的增量更新，检查改写后的批注对象和交叉引用。
+//! `indirect` 的测试：手写 PDFium 风格的增量更新，检查保留下来的对象和重写的交叉引用。
 
 use super::*;
 
@@ -81,41 +81,12 @@ pub(crate) fn assert_offsets_point_at_objects(data: &[u8]) {
 }
 
 #[test]
-fn inline_annotations_become_objects_with_a_table() {
-    let mut data = ORIGINAL.to_vec();
-    data.extend_from_slice(
-        b"\r\n3 0 obj\r\n<</Annots[<</Contents(a\\)b \\(c)/Rect[ 1 2 3 4]/Subtype/Highlight\
-          /Type/Annot>><</Subtype/Text/Type/Annot>> 9 0 R]/Parent 2 0 R /Type/Page>>\r\nendobj\
-          \r\nxref\r\n3 1\r\n0000000070 00000 n\r\ntrailer\r\n<</Size 10/Root 1 0 R/Prev 40\
-          /ID[<01><02>]>>\r\nstartxref\r\n200\r\n%%EOF\r\n",
-    );
-    let out = tidy_incremental_save(ORIGINAL, data);
-    assert!(out.starts_with(ORIGINAL));
-    let text = String::from_utf8_lossy(&out);
-    // PDFium 把相邻的字典连着写：换成的引用之间要隔开。
-    assert!(text.contains("/Annots[ 10 0 R  11 0 R  9 0 R]"), "{text}");
-    assert!(
-        text.contains("10 0 obj\r\n<</Contents(a\\)b \\(c)/Rect[ 1 2 3 4]"),
-        "{text}"
-    );
-    assert!(
-        text.contains("11 0 obj\r\n<</Subtype/Text/Type/Annot>>"),
-        "{text}"
-    );
-    assert!(
-        text.contains("trailer\r\n<</Size 12/Root 1 0 R/ID [<01><02>]/Prev 40>>"),
-        "{text}"
-    );
-    assert_offsets_point_at_objects(&out);
-}
-
-#[test]
-fn inline_annotations_become_objects_with_an_xref_stream() {
+fn an_xref_stream_is_written_again_for_the_kept_objects() {
     let mut data = ORIGINAL.to_vec();
     // 照 PDFium 的写法：交叉引用流的字典里没有 `/Type/XRef`，`endstream` 后面没有 `endobj`。
     let rows = [0u8, 0, 0, 70, 0, 0, 0, 0, 200, 0];
     data.extend_from_slice(
-        b"\r\n5 0 obj\r\n[<</Subtype/Underline/Type/Annot/QuadPoints[ 1 2 3 4 5 6 7 8]>>]\r\nendobj\
+        b"\r\n5 0 obj\r\n[ 9 0 R ]\r\nendobj\
           \r\n3 0 obj\r\n<</Annots 5 0 R /Type/Page>>\r\nendobj\
           \r\n12 0 obj <</Root 1 0 R /Size 13/Info 7 0 R/Prev 40/W[0 4 1]/Index[5 1 12 1]\
           /Length 10>>stream\r\n",
@@ -124,10 +95,9 @@ fn inline_annotations_become_objects_with_an_xref_stream() {
     data.extend_from_slice(b"\r\nendstream\r\nstartxref\r\n200\r\n%%EOF\r\n");
     let out = tidy_incremental_save(ORIGINAL, data);
     let text = String::from_utf8_lossy(&out);
-    assert!(text.contains("5 0 obj\r\n[ 13 0 R ]"), "{text}");
-    assert!(text.contains("13 0 obj\r\n<</Subtype/Underline"), "{text}");
+    assert!(text.contains("5 0 obj\r\n[ 9 0 R ]"), "{text}");
     assert!(
-        text.contains("/Size 14/W[1 4 2]/Index[3 1 5 1 12 2]"),
+        text.contains("/Size 13/W[1 4 2]/Index[3 1 5 1 12 1]"),
         "{text}"
     );
     assert!(
@@ -135,7 +105,7 @@ fn inline_annotations_become_objects_with_an_xref_stream() {
         "{text}"
     );
     let numbers: Vec<u32> = last_xref(&out).into_iter().map(|(n, _)| n).collect();
-    assert_eq!(numbers, [3, 5, 12, 13]);
+    assert_eq!(numbers, [3, 5, 12]);
     assert_offsets_point_at_objects(&out);
 }
 
@@ -149,8 +119,8 @@ fn unchanged_objects_are_not_written_again() {
           \r\n5 0 obj\r\n<</Filter/FlateDecode/Length 4>>stream\r\nabcd\r\nendstream\r\nendobj\
           \r\n3 0 obj\r\n<</Annots[9 0 R]/Type/Page>>\r\nendobj\
           \r\n9 0 obj\r\n<</Contents(new)/Subtype/Highlight/Type/Annot>>\r\nendobj\
-          \r\nxref\r\n1 1\r\n0000000070 00000 n\r\ntrailer\r\n<</Size 10/Root 1 0 R>>\r\n\
-          startxref\r\n70\r\n%%EOF\r\n",
+          \r\nxref\r\n1 1\r\n0000000070 00000 n\r\ntrailer\r\n<</Size 10/Root 1 0 R/Prev 40\
+          /ID[<01><02>]>>\r\nstartxref\r\n70\r\n%%EOF\r\n",
     );
     let out = tidy_incremental_save(ORIGINAL, data);
     assert!(out.starts_with(ORIGINAL));
@@ -163,6 +133,10 @@ fn unchanged_objects_are_not_written_again() {
     for dropped in ["Catalog", "SimHei", "FlateDecode"] {
         assert!(!text.contains(dropped), "{text}");
     }
+    assert!(
+        text.contains("trailer\r\n<</Size 10/Root 1 0 R/ID [<01><02>]/Prev 40>>"),
+        "{text}"
+    );
     let numbers: Vec<u32> = last_xref(&out).into_iter().map(|(n, _)| n).collect();
     assert_eq!(numbers, [3, 9]);
     assert_offsets_point_at_objects(&out);
@@ -198,20 +172,6 @@ fn encrypted_documents_drop_unchanged_objects_and_keep_the_key() {
 
 #[test]
 fn unknown_structure_keeps_the_output() {
-    let mut data = ORIGINAL.to_vec();
-    data.extend_from_slice(
-        b"\r\n3 0 obj\r\n<</Annots[9 0 R]/Type/Page>>\r\nendobj\r\nxref\r\n3 1\r\n\
-          0000000070 00000 n\r\ntrailer\r\n<</Size 10/Root 1 0 R>>\r\nstartxref\r\n70\r\n%%EOF\r\n",
-    );
-    // 加密的文档里有直接写的批注：搬进新对象要重新加密字符串，不改。
-    let encrypted = String::from_utf8_lossy(&data)
-        .replace("/Annots[9 0 R]", "/Annots[<</Type/Annot>>]")
-        .replace("/Root 1 0 R>>", "/Root 1 0 R/Encrypt 8 0 R>>")
-        .into_bytes();
-    assert_eq!(
-        tidy_incremental_save(ORIGINAL, encrypted.clone()),
-        encrypted
-    );
     // 不是在原文件后面追加的内容。
     let other = b"%PDF-1.7 something else".to_vec();
     assert_eq!(tidy_incremental_save(ORIGINAL, other.clone()), other);

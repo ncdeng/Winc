@@ -4,7 +4,7 @@
 //! （见 `App::request_pdf_pages`），尚未渲染完成的页先显示白色底（文件刚被修改时显示旧的位图）。
 //! 选中的字逐行画一层半透明的蓝色；批注由 PDF 引擎画在位图里。右下角显示当前页号和总页数。
 
-use winc_preview::pdf::PageRect;
+use winc_preview::pdf::merge_lines;
 use winc_render::{Color, FontKind, Frame, Rect};
 
 use crate::app::App;
@@ -121,27 +121,6 @@ fn draw_selection(app: &App, frame: &mut Frame<'_>, index: usize, page: Rect, ar
         );
         frame.rect_clipped(rect, color, 0.0, area);
     }
-}
-
-/// 把逐字的外框（显示坐标）合并成逐行的矩形：与当前行在竖直方向上重叠一半以上的字并入该行，
-/// 否则另起一行。
-fn merge_lines(boxes: impl Iterator<Item = PageRect>) -> Vec<PageRect> {
-    let mut lines: Vec<PageRect> = Vec::new();
-    for b in boxes {
-        if let Some(line) = lines.last_mut() {
-            let overlap = line.bottom.min(b.bottom) - line.top.max(b.top);
-            let height = (b.bottom - b.top).min(line.bottom - line.top);
-            if height > 0.0 && overlap >= height * 0.5 {
-                line.left = line.left.min(b.left);
-                line.right = line.right.max(b.right);
-                line.top = line.top.min(b.top);
-                line.bottom = line.bottom.max(b.bottom);
-                continue;
-            }
-        }
-        lines.push(b);
-    }
-    lines
 }
 
 /// 在右下角画「当前页 / 总页数」：当前页是视口中线所在的页。

@@ -286,6 +286,11 @@ impl TextField {
         }
     }
 
+    /// 是否是多行输入框（[`TextField::multiline`]）。
+    pub fn is_multiline(&self) -> bool {
+        self.multiline
+    }
+
     /// 在多行输入框中把光标上移或下移一个显示行。
     ///
     /// `extend` 为 `true` 时扩展选区。光标已经在第一行（或最后一行）时位置不变，返回 `false`。

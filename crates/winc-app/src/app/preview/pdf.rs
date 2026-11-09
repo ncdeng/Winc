@@ -27,6 +27,7 @@ use winc_preview::pdf::{Annotation, AnnotationKind, Document, PageRect, PageSize
 use winc_render::Rect;
 use winit::keyboard::{Key, NamedKey};
 
+use super::markdown::{same_class_span, word_class};
 use crate::app::{App, Focus, NoticeAction, PromptKind, UserEvent};
 use crate::field::TextField;
 
@@ -92,9 +93,9 @@ pub(crate) struct Caret {
     pub index: usize,
 }
 
-/// 输入条里正在写的批注是给谁的。
-#[derive(Debug, Clone, PartialEq)]
-enum Pending {
+/// 输入条里正在写的批注是给谁的（[`PromptKind::PdfComment`]）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Pending {
     /// 给选中的字加带注释的高亮：各页的（页号，字的序号范围）。
     Highlight(Vec<(usize, Range<usize>)>),
     /// 改写第 `page` 页上一个批注（[`Annotation::index`]）的注释。
@@ -133,10 +134,6 @@ pub(crate) struct PdfPreview {
     pub focused: bool,
     /// 右键点中的批注：（页号，在 [`PageText::notes`] 中的位置）。
     pub menu_note: Option<(usize, usize)>,
-    /// 输入条里正在写的批注是给谁的。
-    pending: Option<Pending>,
-    /// 最近一次保存批注后文件的修改时间：文件的修改时间与它相同时是自己保存的，不重新打开。
-    own_write: Option<SystemTime>,
     /// 滚动位置（逻辑像素，内容顶部到视口顶部的距离）。
     pub scroll: f32,
     /// 上一帧绘制的区域（窗口坐标）；不显示时为空矩形。
@@ -171,8 +168,6 @@ impl Default for PdfPreview {
             selection: None,
             focused: false,
             menu_note: None,
-            pending: None,
-            own_write: None,
             scroll: 0.0,
             area: Rect::default(),
             height: 0.0,
@@ -201,16 +196,14 @@ impl PdfPreview {
         self.texts.clear();
         self.selection = None;
         self.menu_note = None;
-        self.pending = None;
-        self.own_write = None;
         self.scroll = 0.0;
         self.height = 0.0;
         self.page_rects.clear();
     }
 
-    /// 修改时间为 `mtime` 的文件是不是刚由本预览保存批注写出的。
-    pub(crate) fn wrote(&self, mtime: Option<SystemTime>) -> bool {
-        self.own_write.is_some() && mtime == self.own_write
+    /// 第 `page` 页上的第 `i` 个批注（[`PageText::notes`] 中的位置）。
+    pub(crate) fn note(&self, page: usize, i: usize) -> Option<&Annotation> {
+        self.texts.get(&page)?.notes.get(i)
     }
 
     /// 最大滚动位置（逻辑像素）。
@@ -355,6 +348,23 @@ fn save_to(document: &Document, path: &Path) -> Result<Option<SystemTime>, Strin
     Ok(std::fs::metadata(path).and_then(|m| m.modified()).ok())
 }
 
+/// 给各页（页号，字的序号范围）加 `kind` 批注的修改，注释文字为 `comment`。
+fn adds(
+    segments: Vec<(usize, Range<usize>)>,
+    kind: AnnotationKind,
+    comment: &str,
+) -> Vec<(usize, Edit)> {
+    let add = |chars| Edit::Add {
+        kind,
+        chars,
+        comment: comment.to_owned(),
+    };
+    segments
+        .into_iter()
+        .map(|(page, chars)| (page, add(chars)))
+        .collect()
+}
+
 /// 在渲染线程中按顺序做完 `edits`。
 fn apply(document: &mut Document, edits: Vec<(usize, Edit)>) -> Result<(), String> {
     for (page, edit) in edits {
@@ -417,9 +427,9 @@ impl App {
             .editor
             .active()
             .filter(|d| d.unsupported == Some(Unsupported::Pdf))
-            .map(|d| (d.id, d.revision, d.path.clone(), d.disk_mtime()));
+            .map(|d| (d.id, d.revision, d.path.clone()));
         let pdf = &mut self.pdf;
-        let Some((id, revision, Some(path), mtime)) = active else {
+        let Some((id, revision, Some(path))) = active else {
             if pdf.doc.is_some() {
                 pdf.reset();
             }
@@ -429,11 +439,6 @@ impl App {
             return;
         }
         let same = pdf.doc.map(|(d, _)| d) == Some(id);
-        // 自己保存批注引起的版本变化：线程里的文档已经是修改后的样子，不必重新打开。
-        if same && pdf.requests.is_some() && pdf.own_write.is_some() && mtime == pdf.own_write {
-            pdf.doc = Some((id, revision));
-            return;
-        }
         // 同一文档的版本改变（磁盘上的文件被修改）时保留滚动位置，新位图到达之前先显示旧的。
         let scroll = same.then_some(pdf.scroll);
         let stale = if same {
@@ -491,6 +496,12 @@ impl App {
                             Done::Rendered(generation, page, pixels)
                         }
                         Job::Read(page) => {
+                            if !wanted
+                                .lock()
+                                .is_ok_and(|w| w.iter().any(|&(p, _)| p == page))
+                            {
+                                continue;
+                            }
                             let text = document.text(page).ok().map(|chars| {
                                 let notes = document.annotations(page).unwrap_or_default();
                                 Arc::new(PageText { chars, notes })
@@ -554,7 +565,12 @@ impl App {
                 Done::Edited(generation, pages, saved) if generation == pdf.generation => {
                     match saved {
                         Ok(mtime) => {
-                            pdf.own_write = mtime;
+                            // 文件是自己写的：文档记下新的修改时间，监视磁盘时不当作外部修改、
+                            // 不重新打开（线程里的文档已经是修改后的样子）。
+                            let doc = pdf.doc.and_then(|(id, _)| self.editor.document_mut(id));
+                            if let (Some(doc), Some(mtime)) = (doc, mtime) {
+                                doc.adopt_disk_mtime(mtime);
+                            }
                             // 改过的页重新渲染、重新读取批注；新位图到达之前先显示旧的。
                             for page in pages {
                                 if let Some(old) = pdf.rendered.remove(&page) {
@@ -596,7 +612,6 @@ impl App {
                 // 版本号换成不会出现的值：下一帧按「文件被修改」重新打开，保留滚动位置。
                 if let Some((id, _)) = self.pdf.doc {
                     self.pdf.doc = Some((id, u64::MAX));
-                    self.pdf.own_write = None;
                 }
                 self.flash(t!("preview-pdf-engine-installed"));
             }
@@ -772,33 +787,20 @@ impl App {
     /// 位置 `at` 所在的词（`line` 为 `false`）或行：词是连着的字母数字、连着的中日韩文字，或者
     /// 单个别的字；行到换行为止。
     fn pdf_unit_at(&self, at: Caret, line: bool) -> Option<(Caret, Caret)> {
-        let chars = &self.pdf.texts.get(&at.page)?.chars;
-        let i = at.index.min(chars.len().checked_sub(1)?);
-        let class = |c: char| {
-            if line {
-                u8::from(c != '\r' && c != '\n')
-            } else if c.is_alphanumeric() && (c as u32) < 0x2E80 || c == '_' {
-                1
-            } else if c.is_alphanumeric() {
-                2
-            } else {
-                0
-            }
-        };
-        let kind = class(chars[i].ch);
-        let (start, end) = if kind == 0 {
-            (i, i + 1)
+        let text: Vec<char> = self
+            .pdf
+            .texts
+            .get(&at.page)?
+            .chars
+            .iter()
+            .map(|c| c.ch)
+            .collect();
+        let i = at.index.min(text.len().checked_sub(1)?);
+        let (start, end) = if line {
+            same_class_span(&text, i, |c| u8::from(c != '\r' && c != '\n'))
         } else {
-            let start = chars[..i]
-                .iter()
-                .rposition(|c| class(c.ch) != kind)
-                .map_or(0, |p| p + 1);
-            let end = chars[i..]
-                .iter()
-                .position(|c| class(c.ch) != kind)
-                .map_or(chars.len(), |p| i + p);
-            (start, end)
-        };
+            same_class_span(&text, i, word_class)
+        }?;
         let caret = |index| Caret {
             page: at.page,
             index,
@@ -907,22 +909,7 @@ impl App {
 
     /// 给选中的字加一个 `kind` 批注（不写注释），取消选区。
     pub(in crate::app) fn pdf_mark(&mut self, kind: AnnotationKind) {
-        let edits = self
-            .pdf
-            .segments()
-            .into_iter()
-            .map(|(page, chars)| {
-                let comment = String::new();
-                (
-                    page,
-                    Edit::Add {
-                        kind,
-                        chars,
-                        comment,
-                    },
-                )
-            })
-            .collect();
+        let edits = adds(self.pdf.segments(), kind, "");
         self.pdf.selection = None;
         self.send_pdf_edits(edits);
         self.request_redraw();
@@ -934,75 +921,49 @@ impl App {
         if segments.is_empty() {
             return;
         }
-        self.pdf.pending = Some(Pending::Highlight(segments));
-        self.open_pdf_comment_prompt(TextField::multiline());
+        let kind = PromptKind::PdfComment(Pending::Highlight(segments));
+        self.open_prompt(kind, TextField::multiline());
     }
 
     /// 改写右键点中的批注的注释：输入框里是现在的注释并已全选。
     pub(in crate::app) fn pdf_edit_note(&mut self) {
-        let Some((page, i)) = self.pdf.menu_note.take() else {
-            return;
-        };
-        let Some(note) = self.pdf.texts.get(&page).and_then(|t| t.notes.get(i)) else {
+        let Some((page, note)) = self.take_menu_note() else {
             return;
         };
         let mut field = TextField::multiline();
         field.set_text(&note.comment);
-        self.pdf.pending = Some(Pending::Comment {
-            page,
-            index: note.index,
-        });
-        self.open_pdf_comment_prompt(field);
+        let index = note.index;
+        self.open_prompt(
+            PromptKind::PdfComment(Pending::Comment { page, index }),
+            field,
+        );
     }
 
     /// 删除右键点中的批注。
     pub(in crate::app) fn pdf_remove_note(&mut self) {
-        let Some((page, i)) = self.pdf.menu_note.take() else {
-            return;
-        };
-        let Some(index) = self
-            .pdf
-            .texts
-            .get(&page)
-            .and_then(|t| t.notes.get(i))
-            .map(|n| n.index)
-        else {
-            return;
-        };
-        self.send_pdf_edits(vec![(page, Edit::Remove(index))]);
+        if let Some((page, note)) = self.take_menu_note() {
+            self.send_pdf_edits(vec![(page, Edit::Remove(note.index))]);
+        }
     }
 
-    /// 弹出写批注的输入条。
-    fn open_pdf_comment_prompt(&mut self, field: TextField) {
-        self.open_prompt(PromptKind::PdfComment, field);
+    /// 取走右键点中的批注：（页号，批注）。
+    fn take_menu_note(&mut self) -> Option<(usize, Annotation)> {
+        let (page, i) = self.pdf.menu_note.take()?;
+        Some((page, self.pdf.note(page, i)?.clone()))
     }
 
     /// 输入条里写完批注、按下回车：加带注释的高亮，或改写已有批注的注释。
-    pub(in crate::app) fn pdf_submit_comment(&mut self, input: &str) {
-        let comment = input.trim().to_owned();
-        let edits = match self.pdf.pending.take() {
-            Some(Pending::Highlight(segments)) => {
+    pub(in crate::app) fn pdf_submit_comment(&mut self, pending: Pending, input: &str) {
+        let comment = input.trim();
+        let edits = match pending {
+            Pending::Highlight(segments) => {
                 self.pdf.selection = None;
-                segments
-                    .into_iter()
-                    .map(|(page, chars)| {
-                        let kind = AnnotationKind::Highlight;
-                        let comment = comment.clone();
-                        (
-                            page,
-                            Edit::Add {
-                                kind,
-                                chars,
-                                comment,
-                            },
-                        )
-                    })
-                    .collect()
+                adds(segments, AnnotationKind::Highlight, comment)
             }
-            Some(Pending::Comment { page, index }) => {
+            Pending::Comment { page, index } => {
+                let comment = comment.to_owned();
                 vec![(page, Edit::Comment { index, comment })]
             }
-            None => return,
         };
         self.send_pdf_edits(edits);
     }

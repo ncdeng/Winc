@@ -60,7 +60,7 @@ impl App {
                 .pdf
                 .note_at(x, y)
                 .filter(|&(page, i)| {
-                    let note = self.pdf.texts.get(&page).and_then(|t| t.notes.get(i));
+                    let note = self.pdf.note(page, i);
                     note.is_some_and(|n| !n.comment.trim().is_empty())
                 })
                 .map_or(Hover::None, |(page, i)| Hover::PdfNote(page, i)),

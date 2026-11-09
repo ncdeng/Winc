@@ -1,25 +1,15 @@
-//! 整理 PDFium 增量保存时追加的那一段：批注改写成间接对象，没有改动的对象不再重复写入。
+//! 整理 PDFium 增量保存时追加的那一段：没有改动的对象不再重复写入。
 //!
-//! PDFium 新建批注时（`FPDFPage_CreateAnnot`）把批注字典直接写在页面的 `/Annots` 数组里
-//! （`/Annots[<<…>>]`）。PDF 规范要求数组中是对批注对象的间接引用；PDFium、Acrobat 等能读
-//! 直接写的字典，但 `PyMuPDF` 等按对象号读取批注的程序会出错。另外，PDFium 增量保存时把打开
-//! 以后读过的所有对象（字体、内容流等）都重新写一遍，文件每保存一次就大一截（一篇 12 页的论文
-//! 约 1 MB）。
+//! PDFium 增量保存时把打开以后读过的所有对象（字体、内容流等）都重新写一遍，文件每保存一次就
+//! 大一截（一篇 12 页的论文约 1 MB）。本模块只保留修改批注可能改动的对象（带 `/Annots` 的页面
+//! 等字典、批注、数组，以及原文件中没有的新对象），再按新的偏移重新生成这一段的交叉引用（交叉
+//! 引用表或交叉引用流，与 PDFium 写出的种类相同）。
 //!
-//! 本模块改写追加的那一段：每个直接写的批注字典改为一个新的间接对象，数组中换成对它的引用；
-//! 只保留修改批注可能改动的对象（带 `/Annots` 的页面等字典、批注、数组，以及原文件中没有的
-//! 新对象）；再按新的偏移重新生成这一段的交叉引用（交叉引用表或交叉引用流，与 PDFium 写出的
-//! 种类相同）。
-//!
-//! 加密的文档中字符串和流按所在对象的对象号加密：保留的对象原样写出、对象号不变，仍然能解密；
-//! 直接写的批注字典要搬进新对象，就得重新加密，因此加密的文档里有直接写的批注时不整理。
-//! （`pdfium` 在保存前让 PDFium 自己把新批注转成间接对象，正常情况下不会有直接写的批注。）
-//!
+//! 保留的对象原样写出、对象号不变：加密的文档中字符串和流按所在对象的对象号加密，照样能解密。
 //! 原文件的内容一个字节也不改。追加的那一段里遇到任何不认得的结构（长度写成间接引用的流等），
 //! 就原样返回 PDFium 的输出。
 
 use std::fmt::Write as _;
-use std::ops::Range;
 
 /// 整理 `data`（原文件 `original` 字节之后追加了 PDFium 的增量更新）；无法整理时原样返回。
 pub(super) fn tidy_incremental_save(original: &[u8], data: Vec<u8>) -> Vec<u8> {
@@ -28,8 +18,8 @@ pub(super) fn tidy_incremental_save(original: &[u8], data: Vec<u8>) -> Vec<u8> {
     }
     match rewrite(original, &data[original.len()..]) {
         Some(section) => {
-            let mut out = Vec::with_capacity(original.len() + section.len());
-            out.extend_from_slice(original);
+            let mut out = data;
+            out.truncate(original.len());
             out.extend_from_slice(&section);
             out
         }
@@ -48,8 +38,6 @@ struct Object<'a> {
 struct Trailer<'a> {
     /// `/Root`、`/Info`、`/ID`、`/Encrypt`、`/Prev` 的原文。
     entries: Vec<(&'static str, &'a [u8])>,
-    /// 文档是否加密（有 `/Encrypt`）。
-    encrypted: bool,
     /// 原有的 `/Size`。
     size: u32,
     /// 交叉引用流的对象号；用交叉引用表时为 `None`。
@@ -91,7 +79,10 @@ fn rewrite(original: &[u8], section: &[u8]) -> Option<Vec<u8>> {
     let (objects, trailer) = parse_section(section)?;
     let size = original_size(original);
     let objects: Vec<Object<'_>> = objects.into_iter().filter(|o| keep(o, size)).collect();
-    let mut next = trailer.size.max(
+    if objects.is_empty() {
+        return Some(Vec::new());
+    }
+    let next = trailer.size.max(
         objects
             .iter()
             .map(|o| o.number + 1)
@@ -99,50 +90,21 @@ fn rewrite(original: &[u8], section: &[u8]) -> Option<Vec<u8>> {
             .max()
             .unwrap_or(0),
     );
-    let mut bodies: Vec<(u32, u16, Vec<u8>)> = Vec::new();
-    let mut created: Vec<(u32, Vec<u8>)> = Vec::new();
-    for object in &objects {
-        let inline = inline_annotations(object.body)?;
-        if inline.is_empty() {
-            bodies.push((object.number, object.generation, object.body.to_vec()));
-            continue;
-        }
-        // 加密的文档：批注字典里的字符串按页面的对象号加密，搬进新对象就解不开了。
-        if trailer.encrypted {
-            return None;
-        }
-        let mut body = Vec::with_capacity(object.body.len());
-        let mut at = 0;
-        for range in inline {
-            body.extend_from_slice(&object.body[at..range.start]);
-            // 前后加空格：相邻的字典之间没有分隔（`<<…>><<…>>`），引用不能连成 `6 0 R7 0 R`。
-            write!(Text(&mut body), " {next} 0 R ").ok()?;
-            created.push((next, object.body[range.clone()].to_vec()));
-            next += 1;
-            at = range.end;
-        }
-        body.extend_from_slice(&object.body[at..]);
-        bodies.push((object.number, object.generation, body));
-    }
-    if bodies.is_empty() {
-        return Some(Vec::new());
-    }
 
     let mut out = Vec::new();
     let mut offsets: Vec<(u32, u16, usize)> = Vec::new();
     // 交叉引用中的偏移指向对象头 `N G obj` 的第一个字节。
-    for (number, generation, body) in &bodies {
+    for object in &objects {
         out.extend_from_slice(b"\r\n");
-        offsets.push((*number, *generation, base + out.len()));
-        write!(Text(&mut out), "{number} {generation} obj\r\n").ok()?;
-        out.extend_from_slice(body);
-        out.extend_from_slice(b"\r\nendobj");
-    }
-    for (number, dict) in &created {
-        out.extend_from_slice(b"\r\n");
-        offsets.push((*number, 0, base + out.len()));
-        write!(Text(&mut out), "{number} 0 obj\r\n").ok()?;
-        out.extend_from_slice(dict);
+        offsets.push((object.number, object.generation, base + out.len()));
+        write!(
+            Text(&mut out),
+            "{} {} obj\r\n",
+            object.number,
+            object.generation
+        )
+        .ok()?;
+        out.extend_from_slice(object.body);
         out.extend_from_slice(b"\r\nendobj");
     }
     out.extend_from_slice(b"\r\n");
@@ -303,42 +265,10 @@ fn trailer_from(dict: &[u8], stream: Option<u32>) -> Option<Trailer<'_>> {
     }
     let size = dict_number(dict, b"Size")?;
     Some(Trailer {
-        encrypted: kept.iter().any(|(key, _)| *key == "Encrypt"),
         entries: kept,
         size: u32::try_from(size).ok()?,
         stream,
     })
-}
-
-/// 对象体 `body` 中直接写的批注字典的位置：页面字典里 `/Annots` 数组中的字典，或者本身是
-/// 数组的对象（单独存放的 `/Annots` 数组）中的字典；只认 `/Type/Annot` 的字典。无法解析时
-/// 返回 `None`。
-fn inline_annotations(body: &[u8]) -> Option<Vec<Range<usize>>> {
-    let array = if body.starts_with(b"<<") {
-        let entries = dict_entries(body)?;
-        match entries.iter().find(|(k, _)| *k == b"Annots") {
-            Some((_, value)) if value.starts_with(b"[") => {
-                let start = value.as_ptr() as usize - body.as_ptr() as usize;
-                start..start + value.len()
-            }
-            _ => return Some(Vec::new()),
-        }
-    } else if body.starts_with(b"[") {
-        0..body.len()
-    } else {
-        return Some(Vec::new());
-    };
-    let mut found = Vec::new();
-    let mut at = skip_space(body, array.start + 1);
-    while at < array.end && body[at] != b']' {
-        let end = skip_value(body, at)?;
-        let item = &body[at..end];
-        if item.starts_with(b"<<") && dict_name(item, b"Type") == Some(b"Annot".as_slice()) {
-            found.push(at..end);
-        }
-        at = skip_space(body, end);
-    }
-    Some(found)
 }
 
 /// `at` 处的对象头 `N G obj`：对象号、代号和对象头之后的位置。

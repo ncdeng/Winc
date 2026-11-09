@@ -453,8 +453,12 @@ impl App {
     /// 处理跳转条和文件树「输入名字」行中的按键。
     fn on_key_prompt(&mut self, event: &KeyEvent, base: &str, cmd: bool) {
         let name_input = self.name_input.is_some();
-        // PDF 批注是多行输入：`⇧↩` 换行，`↑` `↓` 在折好的行之间移动。
-        let note = !name_input && matches!(self.prompt_kind, crate::app::PromptKind::PdfComment);
+        // 多行输入（PDF 批注）：`⇧↩` 换行，`↑` `↓` 在折好的行之间移动。
+        let note = !name_input
+            && self
+                .goto_input
+                .as_ref()
+                .is_some_and(TextField::is_multiline);
         let shift = self.modifiers.shift_key();
 
         match &event.logical_key {
