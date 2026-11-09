@@ -358,3 +358,31 @@ fn measure_render_speed() {
         text / n
     );
 }
+
+/// 手动测速：模拟几个窗口同时打开 `WINC_PDF_SAMPLE` 指定的 PDF，各自渲染前 3 页（新窗口
+/// 视口内和视口附近的页），打印每个窗口从打开到渲染完的耗时。PDFium 的调用经过同一把锁，
+/// 同时渲染时要排队。用 `--release` 运行。
+#[test]
+#[ignore = "测速，需要真实的 PDF，手动运行"]
+fn measure_concurrent_render() {
+    assert!(ready());
+    let path = std::path::PathBuf::from(std::env::var_os("WINC_PDF_SAMPLE").unwrap());
+    for windows in [1, 2, 3] {
+        let started = std::time::Instant::now();
+        let handles: Vec<_> = (0..windows)
+            .map(|_| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let doc = Pdf::open(&path).unwrap();
+                    for (i, page) in doc.pages().iter().take(3).enumerate() {
+                        let height = (1600.0 * page.height / page.width).round() as u32;
+                        doc.render(i, 1600, height).unwrap();
+                    }
+                    started.elapsed()
+                })
+            })
+            .collect();
+        let times: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        eprintln!("{windows} 个窗口同时打开：各自渲染完前 3 页用时 {times:?}");
+    }
+}
