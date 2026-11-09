@@ -295,31 +295,159 @@ fn annotations_in_a_file_with_an_xref_stream_are_saved_as_objects() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// 手动检查真实文件：给 `WINC_PDF_SAMPLE` 指定的 PDF 第 1 页的前两个词各加一条带注释的批注，
-/// 另存为同目录下的 `*.annotated.pdf`，再用其他程序（如 PyMuPDF）读取，确认批注能被读出。
+/// 用一批真实的 PDF 检查加批注和保存。`WINC_PDF_CORPUS` 指定一个或几个目录（用 `;` 分隔），
+/// 递归找出其中的 PDF；原文件只读不写。`WINC_PDF_CORPUS_OUT` 指定输出目录。
+///
+/// 每份 PDF 在前几页中第一个有文字的页上加一条带两行注释的高亮和一条下划线，保存后重新打开，
+/// 检查页数、文字和批注；再改写高亮的注释、删除下划线，保存后再检查一次。两次的保存结果写成
+/// `编号.annotated.pdf` 和 `编号.edited.pdf`，并写一份清单 `manifest.tsv`（编号、页号、原有的
+/// 批注数、增加的字节数、原文件），供 `PyMuPDF` 等独立的解析器复查。需要密码、PDFium 打不开
+/// 或前几页没有文字（扫描件）的 PDF 跳过。
 #[test]
-#[ignore = "需要真实的 PDF，手动运行"]
-fn annotate_a_real_file() {
+#[ignore = "需要一批真实的 PDF，手动运行"]
+fn annotate_a_corpus() {
     assert!(ready());
-    let path = std::path::PathBuf::from(std::env::var_os("WINC_PDF_SAMPLE").unwrap());
-    let mut doc = Pdf::open(&path).unwrap();
-    let text: Vec<char> = doc.text(0).unwrap().iter().map(|c| c.ch).collect();
-    let words: Vec<std::ops::Range<usize>> = text
-        .split(|c| c.is_whitespace())
-        .scan(0, |at, word| {
-            let range = *at..*at + word.len();
-            *at += word.len() + 1;
-            Some(range)
-        })
-        .filter(|r| r.len() >= 2)
-        .take(2)
-        .collect();
-    doc.annotate(0, AnnotationKind::Highlight, words[0].clone(), "测试批注一")
-        .unwrap();
-    doc.annotate(0, AnnotationKind::Underline, words[1].clone(), "测试批注二")
-        .unwrap();
-    let out = path.with_extension("annotated.pdf");
-    save_checked(&doc, &out);
+    let roots = std::env::var_os("WINC_PDF_CORPUS").unwrap();
+    let out = std::path::PathBuf::from(std::env::var_os("WINC_PDF_CORPUS_OUT").unwrap());
+    std::fs::create_dir_all(&out).unwrap();
+    let mut files = Vec::new();
+    for root in std::env::split_paths(&roots) {
+        collect_pdfs(&root, &mut files);
+    }
+    files.sort();
+    let mut manifest = String::from("id\tpage\tbefore\tgrowth\tfile\n");
+    let (mut skipped, mut failed) = (Vec::new(), Vec::new());
+    for (id, file) in files.iter().enumerate() {
+        // 一份出错（包括检查中的断言失败）不影响其余各份。
+        let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            annotate_corpus_file(file, id, &out)
+        }));
+        match checked {
+            Ok(Ok(Some(line))) => manifest.push_str(&line),
+            Ok(Ok(None)) => skipped.push(file.display().to_string()),
+            Ok(Err(e)) => failed.push(format!("{}: {e}", file.display())),
+            Err(_) => failed.push(format!("{}: 检查时 panic", file.display())),
+        }
+    }
+    std::fs::write(out.join("manifest.tsv"), manifest).unwrap();
+    eprintln!(
+        "共 {} 份：通过 {}，跳过 {}，失败 {}",
+        files.len(),
+        files.len() - skipped.len() - failed.len(),
+        skipped.len(),
+        failed.len()
+    );
+    for file in &skipped {
+        eprintln!("跳过 {file}");
+    }
+    assert!(failed.is_empty(), "{failed:#?}");
+}
+
+/// 把 `dir` 下（含子目录）扩展名为 `.pdf`（不分大小写）的文件加进 `files`。
+fn collect_pdfs(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_pdfs(&path, files);
+        } else if path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
+        {
+            files.push(path);
+        }
+    }
+}
+
+/// [`annotate_a_corpus`] 对一份 PDF 的检查：通过时返回清单中的一行，跳过时返回 `None`。
+fn annotate_corpus_file(
+    file: &std::path::Path,
+    id: usize,
+    out: &std::path::Path,
+) -> Result<Option<String>, String> {
+    const NOTE: &str = "回归测试：第一行\n第二行";
+    let original = std::fs::read(file).map_err(|e| e.to_string())?;
+    let Ok(mut doc) = Pdf::open(file) else {
+        return Ok(None);
+    };
+    if !doc.editable() {
+        return Ok(None);
+    }
+    let pages = doc.pages().len();
+    let found = (0..pages.min(5)).find_map(|page| {
+        let text = doc.text(page).ok()?;
+        let boxed = text.iter().filter(|c| c.rect.is_some()).count();
+        (boxed >= 40).then_some((page, text))
+    });
+    let Some((page, text)) = found else {
+        return Ok(None);
+    };
+    let chars: Vec<char> = text.iter().map(|c| c.ch).collect();
+    let before = doc.annotations(page)?.len();
+    let n = chars.len();
+    doc.annotate(page, AnnotationKind::Highlight, n / 4..n / 4 + 12, NOTE)?;
+    doc.annotate(page, AnnotationKind::Underline, n / 2..n / 2 + 12, "")?;
+
+    // 保存一次，检查，重新打开：页数、文字不变，多了两条批注。
+    let saved = |doc: &Pdf, name: &str| -> Result<std::path::PathBuf, String> {
+        let bytes = doc.save()?;
+        // 先写出再检查：出了问题也能拿输出文件去查。
+        let path = out.join(format!("{id:03}.{name}.pdf"));
+        std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
+        if !bytes.starts_with(&original) {
+            return Err(format!("{name}：原文件的内容被改动了"));
+        }
+        if bytes.windows(10).any(|w| w == b"/Annots[<<") {
+            return Err(format!("{name}：批注直接写在了 /Annots 数组里"));
+        }
+        super::indirect::tests::assert_offsets_point_at_objects(&bytes);
+        Ok(path)
+    };
+    let reopen = |path: &std::path::Path, count: usize| -> Result<(Pdf, Vec<_>), String> {
+        let doc = Pdf::open(path)?;
+        if doc.pages().len() != pages {
+            return Err(format!("页数从 {pages} 变成了 {}", doc.pages().len()));
+        }
+        let again: Vec<char> = doc.text(page)?.iter().map(|c| c.ch).collect();
+        if again != chars {
+            return Err("保存后这一页的文字变了".to_owned());
+        }
+        let list = doc.annotations(page)?;
+        if list.len() != count {
+            return Err(format!("应有 {count} 条批注，读出 {} 条", list.len()));
+        }
+        Ok((doc, list))
+    };
+    let annotated = saved(&doc, "annotated")?;
+    let growth = std::fs::metadata(&annotated)
+        .map_err(|e| e.to_string())?
+        .len()
+        - original.len() as u64;
+    drop(doc);
+    let (mut doc, list) = reopen(&annotated, before + 2)?;
+    let (highlight, underline) = (&list[before], &list[before + 1]);
+    if highlight.kind != AnnotationKind::Highlight || highlight.comment != NOTE {
+        return Err(format!("新加的高亮读出来是 {highlight:?}"));
+    }
+    if underline.kind != AnnotationKind::Underline {
+        return Err(format!("新加的下划线读出来是 {underline:?}"));
+    }
+
+    // 改写高亮的注释、删除下划线，再保存、再检查。
+    doc.set_comment(page, highlight.index, "改过的注释")?;
+    doc.remove_annotation(page, underline.index)?;
+    let edited = saved(&doc, "edited")?;
+    drop(doc);
+    let (_, list) = reopen(&edited, before + 1)?;
+    if list[before].comment != "改过的注释" {
+        return Err(format!("改过的高亮读出来是 {:?}", list[before]));
+    }
+    Ok(Some(format!(
+        "{id:03}\t{page}\t{before}\t{growth}\t{}\n",
+        file.display()
+    )))
 }
 
 /// 手动测速：逐页渲染 `WINC_PDF_SAMPLE` 指定的 PDF（宽 1600 像素），能读文字时再逐页读文字和
