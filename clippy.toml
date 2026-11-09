@@ -1,5 +1,5 @@
 # 文档中可以不加反引号的专有名词；".." 保留 clippy 默认的那一组（macOS、GitHub……）。
-doc-valid-idents = ["AppImage", "ConPTY", "EdDSA", ".."]
+doc-valid-idents = ["AppImage", "ConPTY", "EdDSA", "PDFium", ".."]
 # Windows 上 `std::fs::canonicalize` 返回带 `\\?\` 前缀的路径；一律用去掉了前缀的版本。
 disallowed-methods = [
     { path = "std::fs::canonicalize", reason = "用 winc_config::files::canonicalize：Windows 上去掉 \\\\?\\ 前缀" },

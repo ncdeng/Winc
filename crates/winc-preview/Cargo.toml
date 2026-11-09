@@ -29,9 +29,10 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
 objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGBitmapContext", "CGColorSpace", "CGContext", "CGImage", "CGPDFDocument", "CGPDFPage"] }
 
 # Windows：PDF 由系统的 `Windows.Data.Pdf` 渲染、WIC 解码（见 src/pdf/win.rs）。只开用到的 WinRT
-# 命名空间。
+# 命名空间。`pdfium.dll` 存在时改用 PDFium（见 src/pdf/pdfium.rs），用 `LoadLibraryExW` 在运行时
+# 加载，不在构建时链接。
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.62", default-features = false, features = ["std", "Data_Pdf", "Foundation", "Graphics_Imaging", "Storage", "Storage_Streams"] }
+windows = { version = "0.62", default-features = false, features = ["std", "Data_Pdf", "Foundation", "Graphics_Imaging", "Storage", "Storage_Streams", "Win32_Foundation", "Win32_System_LibraryLoader"] }
 
 [lints]
 workspace = true

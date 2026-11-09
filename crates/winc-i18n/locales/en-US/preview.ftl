@@ -104,3 +104,5 @@ preview-pdf-invalid = Not a valid PDF file
 preview-pdf-encrypted = Encrypted PDFs can’t be previewed
 preview-pdf-empty = The PDF has no pages
 preview-pdf-render-failed = The page couldn’t be rendered
+preview-pdf-annotate-failed = The annotation couldn’t be changed
+preview-pdf-save-failed = The annotations couldn’t be saved to the PDF

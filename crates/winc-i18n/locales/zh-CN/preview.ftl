@@ -104,3 +104,5 @@ preview-pdf-invalid = 不是有效的 PDF 文件
 preview-pdf-encrypted = 不支持预览加密的 PDF
 preview-pdf-empty = PDF 中没有页面
 preview-pdf-render-failed = 无法渲染这一页
+preview-pdf-annotate-failed = 无法修改这里的批注
+preview-pdf-save-failed = 无法保存 PDF 中的批注
