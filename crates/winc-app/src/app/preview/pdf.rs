@@ -8,21 +8,26 @@
 //! 文档能读取文字时（Windows 上有 PDFium，见 `winc_preview::pdf`），线程还读出这几页的文字和
 //! 批注：拖动鼠标按字选中，右键给选中的字加高亮、下划线、删除线或写批注，批注随即保存进 PDF
 //! 文件。保存引起的文件变化不重新打开文档（文档在线程中已经是修改后的样子），只重画改过的页。
+//!
+//! 安装包不带 PDFium：没有 PDFium 时 PDF 只能预览，点击或右键时提示下载
+//! （`App::install_pdf_engine`），装好后重新打开当前的 PDF。
 
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::ops::Range;
 use std::path::Path;
+use std::process::Stdio;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::SystemTime;
 
 use winc_editor::{DocumentId, Unsupported};
+use winc_i18n::t;
 use winc_preview::image::Pixels;
 use winc_preview::pdf::{Annotation, AnnotationKind, Document, PageRect, PageSize, TextChar};
 use winc_render::Rect;
 use winit::keyboard::{Key, NamedKey};
 
-use crate::app::{App, Focus, PromptKind, UserEvent};
+use crate::app::{App, Focus, NoticeAction, PromptKind, UserEvent};
 use crate::field::TextField;
 
 /// 方向键每次滚动的距离（逻辑像素）：约为正文三行的高度。
@@ -140,6 +145,10 @@ pub(crate) struct PdfPreview {
     pub height: f32,
     /// 上一帧各页的位置（逻辑像素，相对内容左上角），点击时换算鼠标落在哪一页。
     pub page_rects: Vec<Rect>,
+    /// 正在下载、安装 PDFium 时接收结果（见 [`App::install_pdf_engine`]）；不随文档重置。
+    installing: Option<mpsc::Receiver<Result<(), String>>>,
+    /// 已经提示过下载 PDFium：每次启动只在点击时提示一次，之后只在右键菜单里提供。
+    hinted: bool,
 }
 
 impl Default for PdfPreview {
@@ -168,6 +177,8 @@ impl Default for PdfPreview {
             area: Rect::default(),
             height: 0.0,
             page_rects: Vec::new(),
+            installing: None,
+            hinted: false,
         }
     }
 }
@@ -311,6 +322,11 @@ impl PdfPreview {
         })
     }
 
+    /// 是否正在下载、安装 PDFium。
+    pub(crate) fn is_installing(&self) -> bool {
+        self.installing.is_some()
+    }
+
     /// 是否还在等渲染线程的结果（测试中等待用）。
     #[cfg(all(test, any(target_os = "macos", windows)))]
     pub(crate) fn is_busy(&self) -> bool {
@@ -322,7 +338,7 @@ impl PdfPreview {
 /// 把修改过的文档保存进 `path`：先写进同一目录下的临时文件，再替换原文件，读者不会读到写了
 /// 一半的文件。返回保存后文件的修改时间。
 fn save_to(document: &Document, path: &Path) -> Result<Option<SystemTime>, String> {
-    let failed = || winc_i18n::t!("preview-pdf-save-failed").to_owned();
+    let failed = || t!("preview-pdf-save-failed").to_owned();
     let bytes = document.save()?;
     let dir = path.parent().ok_or_else(failed)?;
     let name = path.file_name().ok_or_else(failed)?.to_string_lossy();
@@ -363,6 +379,33 @@ fn page_text(text: &PageText, range: Range<usize>) -> String {
         .map(|c| c.ch)
         .collect();
     raw.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+/// 下载 PDFium 安装包的超时（秒）：安装包约 4 MB，慢速网络也足够下完。
+const ENGINE_TIMEOUT: &str = "600";
+
+/// 用 `curl` 下载 `url` 的内容（PDFium 的安装包），内容大小有上限。
+fn fetch_engine(url: &str) -> Result<Vec<u8>, String> {
+    let mut command = std::process::Command::new("curl");
+    command
+        .args([
+            "-fsSL",
+            "--max-time",
+            ENGINE_TIMEOUT,
+            "--max-filesize",
+            "67108864",
+        ])
+        .arg(url)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null());
+    // Windows 上 `curl.exe` 是命令行程序：不弹出控制台窗口。
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::creation_flags(&mut command, 0x0800_0000);
+    let output = command.output().map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err(t!("preview-pdf-engine-download-failed").to_owned());
+    }
+    Ok(output.stdout)
 }
 
 impl App {
@@ -469,13 +512,13 @@ impl App {
             });
         if spawned.is_err() {
             pdf.requests = None;
-            pdf.pages = Some(Err(winc_i18n::t!("preview-pdf-render-failed").to_owned()));
+            pdf.pages = Some(Err(t!("preview-pdf-render-failed").to_owned()));
         }
     }
 
     /// 收下渲染线程送回的结果。
     pub(crate) fn poll_pdf(&mut self) {
-        let mut changed = false;
+        let mut changed = self.poll_pdf_engine();
         while let Ok(done) = self.pdf.receiver.try_recv() {
             let pdf = &mut self.pdf;
             match done {
@@ -521,7 +564,7 @@ impl App {
                                 pdf.texts.remove(&page);
                                 pdf.reading.remove(&page);
                             }
-                            self.flash(winc_i18n::t!("preview-pdf-saved"));
+                            self.flash(t!("preview-pdf-saved"));
                         }
                         Err(reason) => self.notify(reason),
                     }
@@ -533,6 +576,73 @@ impl App {
         if changed {
             self.request_redraw();
         }
+    }
+
+    /// 收下 PDFium 的安装结果，返回是否收到了。装好时用 PDFium 重新打开当前的 PDF。
+    fn poll_pdf_engine(&mut self) -> bool {
+        let Some(receiver) = &self.pdf.installing else {
+            return false;
+        };
+        let result = match receiver.try_recv() {
+            Ok(result) => result,
+            Err(mpsc::TryRecvError::Empty) => return false,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Err(t!("preview-pdf-engine-download-failed").to_owned())
+            }
+        };
+        self.pdf.installing = None;
+        match result {
+            Ok(()) => {
+                // 版本号换成不会出现的值：下一帧按「文件被修改」重新打开，保留滚动位置。
+                if let Some((id, _)) = self.pdf.doc {
+                    self.pdf.doc = Some((id, u64::MAX));
+                    self.pdf.own_write = None;
+                }
+                self.flash(t!("preview-pdf-engine-installed"));
+            }
+            Err(reason) => self.notify(t!("preview-pdf-engine-failed", reason = reason)),
+        }
+        true
+    }
+
+    /// 当前的 PDF 是否因为没有 PDFium 而只能预览：此时可以下载 PDFium。
+    pub(crate) fn pdf_engine_missing(&self) -> bool {
+        matches!(self.pdf.pages, Some(Ok(_)))
+            && !self.pdf.editable
+            && winc_preview::pdf::engine_archive_url().is_some()
+            && !winc_preview::pdf::engine_available()
+    }
+
+    /// 下载并安装 PDFium（提示条和右键菜单上的「下载」）。
+    pub(in crate::app) fn install_pdf_engine(&mut self) {
+        if let Some(url) = winc_preview::pdf::engine_archive_url() {
+            self.install_pdf_engine_from(url);
+        }
+    }
+
+    /// 在后台线程中下载 `url` 的 PDFium 安装包并安装，结果由 [`App::poll_pdf`] 收下。正在
+    /// 安装时只提示一下，不重复下载。
+    pub(in crate::app) fn install_pdf_engine_from(&mut self, url: &str) {
+        if self.pdf.installing.is_none() {
+            let (sender, receiver) = mpsc::channel();
+            let (url, proxy) = (url.to_owned(), self.proxy.clone());
+            let spawned = std::thread::Builder::new()
+                .name("winc-pdfium".to_owned())
+                .spawn(move || {
+                    let installed = fetch_engine(&url)
+                        .and_then(|archive| winc_preview::pdf::install_engine(&archive));
+                    let _ = sender.send(installed);
+                    if let Some(proxy) = &proxy {
+                        let _ = proxy.send_event(UserEvent::ImageReady);
+                    }
+                });
+            if let Err(e) = spawned {
+                self.notify(t!("preview-pdf-engine-failed", reason = e.to_string()));
+                return;
+            }
+            self.pdf.installing = Some(receiver);
+        }
+        self.flash(t!("preview-pdf-engine-downloading"));
     }
 
     /// 这一帧需要的页：（页号，位图宽度，位图高度），单位为物理像素。
@@ -631,6 +741,14 @@ impl App {
         self.pdf.focused = true;
         self.request_redraw();
         if !self.pdf.editable {
+            // 没有 PDFium 选不了字：第一次点击时说明原因，提示下载。
+            if !self.pdf.hinted && self.pdf_engine_missing() {
+                self.pdf.hinted = true;
+                self.notify_with(
+                    t!("preview-pdf-engine-hint"),
+                    NoticeAction::InstallPdfEngine,
+                );
+            }
             return;
         }
         let count = self.click_count(x, y);
@@ -739,13 +857,17 @@ impl App {
         self.request_redraw();
     }
 
-    /// 处理 PDF 上的右键点击，返回是否点在可以选字的 PDF 上。
+    /// 处理 PDF 上的右键点击，返回是否点在可以选字的 PDF 上，或者点在因为没有 PDFium 而只能
+    /// 预览的 PDF 上（菜单里只有下载 PDFium）。
     ///
     /// PDF 拿到键盘，点击位置在选区外时取消选区；点在批注上时记下这个批注，菜单里可以改写、
     /// 删除它。
     pub(in crate::app) fn pdf_context_target(&mut self, x: f32, y: f32) -> bool {
-        if !self.pdf.area.contains(x, y) || !self.pdf.editable {
+        if !self.pdf.area.contains(x, y) {
             return false;
+        }
+        if !self.pdf.editable {
+            return self.pdf_engine_missing();
         }
         self.focus = Focus::Editor;
         let pdf = &mut self.pdf;
@@ -780,7 +902,7 @@ impl App {
         {
             return;
         }
-        self.notify(winc_i18n::t!("preview-pdf-annotate-failed").to_owned());
+        self.notify(t!("preview-pdf-annotate-failed").to_owned());
     }
 
     /// 给选中的字加一个 `kind` 批注（不写注释），取消选区。

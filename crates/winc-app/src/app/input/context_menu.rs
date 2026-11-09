@@ -317,6 +317,8 @@ pub enum MenuCommand {
     PdfEditNote,
     /// PDF：删除右键点中的批注。
     PdfRemoveNote,
+    /// PDF：下载 PDFium（没有 PDFium 时 PDF 只能预览）。
+    PdfInstallEngine,
     /// 终端：查找。
     TerminalFind,
     /// 终端：清屏和回滚缓冲。
@@ -449,6 +451,7 @@ impl MenuCommand {
             MenuCommand::PdfComment => t!("menu-pdf-comment"),
             MenuCommand::PdfEditNote => t!("menu-pdf-edit-note"),
             MenuCommand::PdfRemoveNote => t!("menu-pdf-remove-note"),
+            MenuCommand::PdfInstallEngine => t!("menu-pdf-install-engine"),
             MenuCommand::TerminalFind => t!("cmd-find"),
             MenuCommand::TerminalClear => t!("menu-terminal-clear"),
             MenuCommand::TerminalMaximize => t!("menu-terminal-maximize"),

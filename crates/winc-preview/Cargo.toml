@@ -30,9 +30,11 @@ objc2-core-graphics = { version = "0.3", default-features = false, features = ["
 
 # Windows：PDF 由系统的 `Windows.Data.Pdf` 渲染、WIC 解码（见 src/pdf/win.rs）。只开用到的 WinRT
 # 命名空间。`pdfium.dll` 存在时改用 PDFium（见 src/pdf/pdfium.rs），用 `LoadLibraryExW` 在运行时
-# 加载，不在构建时链接。
+# 加载，不在构建时链接；安装包不带它，用户需要时下载（见 src/pdf/pdfium/install.rs）。下载的安装包
+# 用 SHA-256 核对：sha2 已经随 winc-app 的 ed25519-dalek 在依赖树里，不多出新的 crate。
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", default-features = false, features = ["std", "Data_Pdf", "Foundation", "Graphics_Imaging", "Storage", "Storage_Streams", "Win32_Foundation", "Win32_System_LibraryLoader"] }
+sha2 = { version = "0.10", default-features = false }
 
 [lints]
 workspace = true

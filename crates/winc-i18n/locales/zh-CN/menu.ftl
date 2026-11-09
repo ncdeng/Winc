@@ -78,6 +78,7 @@ menu-pdf-strikeout = 删除线
 menu-pdf-comment = 高亮并写批注…
 menu-pdf-edit-note = 修改批注…
 menu-pdf-remove-note = 删除批注
+menu-pdf-install-engine = 下载 PDFium（选中文字、加批注）
 menu-add-bookmark = 添加书签
 menu-remove-bookmark = 移除书签
 menu-detect-language = 按文件名识别

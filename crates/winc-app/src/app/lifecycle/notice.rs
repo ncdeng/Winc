@@ -17,6 +17,8 @@ pub enum NoticeAction {
     FormatSettings,
     /// 「查看输出」：在只读标签中打开 Git 操作的输出。
     GitOutput,
+    /// 「下载」：下载 PDFium，之后 PDF 可以选中文字、加批注。
+    InstallPdfEngine,
 }
 
 /// 到期后正在淡出的提示条。
@@ -38,6 +40,7 @@ impl NoticeAction {
             }
             NoticeAction::Install { .. } => t!("workspace-notice-install"),
             NoticeAction::FormatSettings => t!("workspace-notice-open-settings"),
+            NoticeAction::InstallPdfEngine => t!("preview-pdf-engine-install"),
         }
     }
 }
@@ -141,6 +144,7 @@ impl App {
                 self.settings_show_page(SettingsPage::Format);
             }
             NoticeAction::GitOutput => self.show_git_output(),
+            NoticeAction::InstallPdfEngine => self.install_pdf_engine(),
         }
         self.request_redraw();
     }

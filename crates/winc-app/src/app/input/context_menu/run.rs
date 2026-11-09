@@ -92,6 +92,7 @@ impl App {
                     MenuCommand::PdfComment => self.pdf_comment_selection(),
                     MenuCommand::PdfEditNote => self.pdf_edit_note(),
                     MenuCommand::PdfRemoveNote => self.pdf_remove_note(),
+                    MenuCommand::PdfInstallEngine => self.install_pdf_engine(),
                     _ => {}
                 }
             }

@@ -3210,6 +3210,7 @@ dependencies = [
  "png",
  "pulldown-cmark",
  "roxmltree",
+ "sha2",
  "winc-i18n",
  "windows",
  "zeno",

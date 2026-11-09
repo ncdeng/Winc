@@ -449,6 +449,11 @@ impl App {
                 }
                 menu
             }
+            // 没有 PDFium 时 PDF 只能预览：菜单里只有下载 PDFium，正在下载时不可用。
+            MenuTarget::Pdf if !self.pdf.editable => vec![MenuEntry::Item(
+                MenuCommand::PdfInstallEngine,
+                !self.pdf.is_installing(),
+            )],
             MenuTarget::Pdf => {
                 let marked = self.pdf_can_mark();
                 let mut menu = vec![

@@ -3314,3 +3314,73 @@ fn pdf_text_can_be_selected_annotated_and_saved() {
     drop(app);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// 没有 PDFium 时 PDF 只能预览：第一次点击提示下载 PDFium，右键菜单里只有下载；装好后重新
+/// 打开，可以选字。安装包取自 `WINC_PDFIUM_ARCHIVE` 指定的本地文件（用 `file://` 地址「下载」，
+/// 不联网），没有设置时只检查提示和菜单。已经能加载 PDFium（设置了 `WINC_PDFIUM`）时跳过。
+#[cfg(windows)]
+#[test]
+fn without_pdfium_the_pdf_offers_to_download_it() {
+    use crate::app::input::context_menu::MenuCommand;
+
+    if winc_preview::pdf::engine_available() {
+        return;
+    }
+    let dir = sample_folder("pdf-engine");
+    winc_preview::pdf::set_engine_dir(dir.join("pdfium"));
+    let path = dir.join("论文.pdf");
+    std::fs::write(&path, sample_pdf(1)).unwrap();
+    let mut app = open_pdf(&path, false);
+    assert!(!app.pdf.editable);
+
+    // 第一次点击：提示下载；之后的点击不再提示。
+    let r = app.pdf.page_rects[0];
+    let (x, y) = (
+        app.pdf.area.x + r.x + r.w / 2.0,
+        app.pdf.area.y + r.y + 40.0,
+    );
+    app.on_mouse_move(x, y);
+    app.on_mouse_down(MouseButton::Left);
+    app.on_mouse_up(MouseButton::Left);
+    assert_eq!(app.notice_action, Some(NoticeAction::InstallPdfEngine));
+    app.notice = None;
+    app.notice_action = None;
+    app.on_mouse_down(MouseButton::Left);
+    app.on_mouse_up(MouseButton::Left);
+    assert_eq!(app.notice_action, None);
+
+    // 右键：菜单里只有下载 PDFium。
+    right_click(&mut app, (x, y));
+    assert_eq!(
+        menu_commands(&app),
+        vec![(MenuCommand::PdfInstallEngine, true)]
+    );
+    app.context_menu = None;
+
+    let Some(archive) = std::env::var_os("WINC_PDFIUM_ARCHIVE") else {
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    };
+    let url = format!(
+        "file:///{}",
+        std::path::Path::new(&archive)
+            .display()
+            .to_string()
+            .replace('\\', "/")
+    );
+    app.install_pdf_engine_from(&url);
+    for _ in 0..1500 {
+        app.poll_pdf();
+        if !app.pdf.is_installing() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(!app.pdf.is_installing(), "安装 PDFium 超时");
+    assert_eq!(app.notice, None, "安装失败");
+    assert!(dir.join("pdfium").join("pdfium.dll").is_file());
+    pdf_until(&mut app, |app| {
+        app.pdf.editable && app.pdf.texts.contains_key(&0)
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+}

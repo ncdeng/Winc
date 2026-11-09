@@ -1,9 +1,10 @@
 //! PDF 的逐页渲染：用系统的 PDF 渲染器（macOS 的 CoreGraphics、Windows 的
 //! `Windows.Data.Pdf`）把一页画成指定大小的位图。
 //!
-//! Windows 上 `winc.exe` 旁边有 PDFium 的动态库（`pdfium.dll`）时改用 PDFium（见 `pdfium`），
-//! 此时还能读取每页的文字（[`Document::text`]）、读写批注（[`Document::annotations`]、
-//! [`Document::annotate`]）并保存（[`Document::save`]）；[`Document::editable`] 说明能否这样做。
+//! Windows 上能加载 PDFium 的动态库（`pdfium.dll`，安装包不带，由 [`install_engine`] 下载安装）
+//! 时改用 PDFium（见 `pdfium`），此时还能读取每页的文字（[`Document::text`]）、读写批注
+//! （[`Document::annotations`]、[`Document::annotate`]）并保存（[`Document::save`]）；
+//! [`Document::editable`] 说明能否这样做。
 //! 系统的渲染器只做预览，不解析文字和批注。
 //!
 //! 打开文档时只读取页数和各页大小；渲染按页、按指定大小进行，调用方只渲染视口附近的页，内存只占
@@ -11,7 +12,7 @@
 //! 通常为每个打开的 PDF 启动一个渲染线程。其他平台不支持，[`supported`] 返回 `false`。
 
 use std::ops::Range;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::image::Pixels;
 
@@ -44,6 +45,48 @@ pub const MAX_SIDE: u32 = 16384;
 /// 当前平台能否预览 PDF：macOS 与 Windows 能，其他平台不能。
 pub fn supported() -> bool {
     cfg!(any(target_os = "macos", windows))
+}
+
+/// 设置 PDFium 的安装目录：[`install_engine`] 把 `pdfium.dll` 放在这里，加载时 `winc.exe`
+/// 旁边没有 `pdfium.dll` 就到这里找。只有第一次调用有效；只在 Windows 上起作用。
+pub fn set_engine_dir(dir: PathBuf) {
+    #[cfg(windows)]
+    pdfium::set_dir(dir);
+    #[cfg(not(windows))]
+    let _ = dir;
+}
+
+/// PDFium 能否加载：能时打开的 PDF 可以选文字、加批注（见 [`Document::editable`]）。只有
+/// Windows 用 PDFium，其他平台总是 `false`。
+pub fn engine_available() -> bool {
+    #[cfg(windows)]
+    return pdfium::available();
+    #[cfg(not(windows))]
+    false
+}
+
+/// PDFium 安装包的下载地址；不用 PDFium 的平台返回 `None`。
+pub fn engine_archive_url() -> Option<&'static str> {
+    #[cfg(windows)]
+    return Some(pdfium::ARCHIVE_URL);
+    #[cfg(not(windows))]
+    None
+}
+
+/// 安装从 [`engine_archive_url`] 下载的安装包 `archive`：核对通过后把 `pdfium.dll` 放进
+/// [`set_engine_dir`] 设置的目录。
+///
+/// # Errors
+///
+/// 安装包与固定版本不符、目录无法写入，或这个平台不用 PDFium 时返回给用户看的原因。
+pub fn install_engine(archive: &[u8]) -> Result<(), String> {
+    #[cfg(windows)]
+    return pdfium::install(archive);
+    #[cfg(not(windows))]
+    {
+        let _ = archive;
+        Err(winc_i18n::t!("preview-pdf-unsupported").to_owned())
+    }
 }
 
 /// `path` 是否是 PDF 文件（按扩展名判断）。

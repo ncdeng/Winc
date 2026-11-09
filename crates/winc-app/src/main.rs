@@ -122,6 +122,12 @@ fn main() {
         .and_then(Path::parent)
         .map(|dir| dir.join("backups"));
 
+    // 用户下载的 PDFium 也放在状态文件所在目录下（便携版在数据目录中）。测量时同样设置：PDF 的
+    // 打开方式与平时一致。
+    if let Some(dir) = winc_config::state_path().as_deref().and_then(Path::parent) {
+        winc_preview::pdf::set_engine_dir(dir.join("pdfium"));
+    }
+
     // 已经有 winc 在运行：交给它打开并切到前台，本进程不再启动。
     // 临时打开（`--wait`、`-`）要等标签关闭或读标准输入，总是自己打开；测量时、指定了
     // `--new-instance` 时也不交出去。

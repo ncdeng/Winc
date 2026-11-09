@@ -84,6 +84,7 @@ menu-pdf-strikeout = Strikethrough
 menu-pdf-comment = Highlight with Comment…
 menu-pdf-edit-note = Edit Comment…
 menu-pdf-remove-note = Delete Annotation
+menu-pdf-install-engine = Download PDFium to Select Text and Annotate
 menu-add-bookmark = Add Bookmark
 menu-remove-bookmark = Remove Bookmark
 menu-detect-language = Detect from File Name

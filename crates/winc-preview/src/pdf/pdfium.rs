@@ -1,8 +1,9 @@
 //! Windows 上用 PDFium（Chromium 的 PDF 引擎）打开和渲染 PDF，并读取文字、读写批注。
 //!
-//! PDFium 是放在 `winc.exe` 旁边的动态库 `pdfium.dll`，第一次用到时加载；环境变量
-//! `WINC_PDFIUM` 可以指定动态库的路径。找不到或加载失败时 [`available`] 返回 `false`，调用方改用
-//! 系统的 `Windows.Data.Pdf`，此时只能预览。
+//! PDFium 是动态库 `pdfium.dll`：安装包不带它，用户在 winc 中下载后装进安装目录（[`set_dir`]，
+//! 见 `install`）；放在 `winc.exe` 旁边也可以。第一次用到时加载；环境变量 `WINC_PDFIUM` 可以指定
+//! 动态库的路径。找不到或加载失败时 [`available`] 返回 `false`，调用方改用系统的
+//! `Windows.Data.Pdf`，此时只能预览；之后装好了再调用时重新加载，不必重启。
 //!
 //! 文件整个读进内存后交给 PDFium（`FPDF_LoadMemDocument64`），PDFium 不持有文件句柄：TeX 等
 //! 程序重新生成 PDF 时不会因为文件被占用而失败。PDFium 不是线程安全的，进程中的所有调用都在持有
@@ -183,8 +184,15 @@ struct Api {
 /// 串行执行所有 PDFium 调用的锁。
 static LOCK: Mutex<()> = Mutex::new(());
 
-/// 加载好的 PDFium；加载失败时为 `None`，不再重试。
-static API: OnceLock<Option<Api>> = OnceLock::new();
+/// 加载好的 PDFium。加载成功前每次用到都重新查找：用户在运行中安装了 PDFium（见
+/// [`install`]）后不必重启。
+static API: OnceLock<Api> = OnceLock::new();
+
+/// 加载 PDFium 时持有的锁：几个线程同时首次用到时只加载、初始化一次。
+static LOADING: Mutex<()> = Mutex::new(());
+
+/// 安装 PDFium 的目录（见 [`set_dir`]）；没有设置时只在可执行文件旁边查找。
+static DIR: OnceLock<PathBuf> = OnceLock::new();
 
 /// 取得 [`LOCK`]；持有锁的线程 panic 过时照常取得，PDFium 的状态不受 Rust 的 panic 影响。
 fn lock() -> MutexGuard<'static, ()> {
@@ -193,7 +201,15 @@ fn lock() -> MutexGuard<'static, ()> {
 
 /// 加载好的 PDFium；动态库不存在或缺少用到的函数时返回 `None`。
 fn api() -> Option<&'static Api> {
-    API.get_or_init(load).as_ref()
+    if let Some(api) = API.get() {
+        return Some(api);
+    }
+    let _loading = LOADING.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(api) = API.get() {
+        return Some(api);
+    }
+    let api = load()?;
+    Some(API.get_or_init(|| api))
 }
 
 /// PDFium 能否使用：动态库存在并加载成功。
@@ -201,14 +217,42 @@ pub(super) fn available() -> bool {
     api().is_some()
 }
 
-/// 动态库的位置：`WINC_PDFIUM` 指定的路径，否则是可执行文件旁边的 `pdfium.dll`。
+/// 设置安装 PDFium 的目录（应用的数据目录下）：可执行文件旁边没有 `pdfium.dll` 时在这里
+/// 查找，[`install`] 也装到这里。只能设置一次，之后的调用不起作用。
+pub(super) fn set_dir(dir: PathBuf) {
+    let _ = DIR.set(dir);
+}
+
+/// 安装 PDFium 的目录；没有设置时为 `None`。
+pub(super) fn dir() -> Option<&'static Path> {
+    DIR.get().map(PathBuf::as_path)
+}
+
+/// 动态库的位置：`WINC_PDFIUM` 指定的路径；否则依次是可执行文件旁边、安装目录（[`set_dir`]）
+/// 中的 `pdfium.dll`，取第一个存在的。
 fn library_path() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("WINC_PDFIUM") {
         return Some(PathBuf::from(path));
     }
-    let exe = std::env::current_exe().ok()?;
-    Some(exe.parent()?.join("pdfium.dll"))
+    let exe = std::env::current_exe().ok();
+    let beside = exe.as_deref().and_then(Path::parent).map(Path::to_path_buf);
+    [beside, dir().map(Path::to_path_buf)]
+        .into_iter()
+        .flatten()
+        .map(|dir| dir.join("pdfium.dll"))
+        .find(|path| path.is_file())
 }
+
+/// 核对 PDFium 的安装包 `archive`，把其中的动态库装进安装目录（[`set_dir`]；没有设置时装在
+/// 可执行文件旁边）；装好后 [`available`] 即为 `true`，不必重启。
+pub(super) fn install(archive: &[u8]) -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let dir = dir().or_else(|| exe.parent()).unwrap_or(Path::new("."));
+    install::install(archive, dir)
+}
+
+/// PDFium 安装包的下载地址（固定版本）。
+pub(super) const ARCHIVE_URL: &str = install::ARCHIVE_URL;
 
 /// 取出动态库 `lib` 中名为 `name` 的函数。
 ///
@@ -891,6 +935,7 @@ fn merge_lines(boxes: &[RectF]) -> Vec<RectF> {
 }
 
 mod indirect;
+mod install;
 
 #[cfg(test)]
 mod tests;
