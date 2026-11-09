@@ -177,13 +177,33 @@ fn unchanged_objects_are_not_written_again() {
 }
 
 #[test]
+fn encrypted_documents_drop_unchanged_objects_and_keep_the_key() {
+    // 加密的文档：没改动的对象照样去掉；留下的对象原样写出（对象号不变，加密的字符串仍能
+    // 解密），尾部字典保留 `/Encrypt`。
+    let mut data = ORIGINAL.to_vec();
+    data.extend_from_slice(
+        b"\r\n4 0 obj\r\n<</BaseFont/SimHei/Subtype/Type0/Type/Font>>\r\nendobj\
+          \r\n3 0 obj\r\n<</Annots[9 0 R]/Type/Page>>\r\nendobj\
+          \r\n9 0 obj\r\n<</Contents<8f1e2a>/Subtype/Highlight/Type/Annot>>\r\nendobj\
+          \r\nxref\r\n3 1\r\n0000000070 00000 n\r\ntrailer\r\n<</Size 10/Root 1 0 R\
+          /Encrypt 8 0 R/ID[<01><02>]>>\r\nstartxref\r\n70\r\n%%EOF\r\n",
+    );
+    let out = tidy_incremental_save(ORIGINAL, data);
+    let text = String::from_utf8_lossy(&out[ORIGINAL.len()..]);
+    assert!(!text.contains("SimHei"), "{text}");
+    assert!(text.contains("9 0 obj\r\n<</Contents<8f1e2a>"), "{text}");
+    assert!(text.contains("/Encrypt 8 0 R"), "{text}");
+    assert_offsets_point_at_objects(&out);
+}
+
+#[test]
 fn unknown_structure_keeps_the_output() {
     let mut data = ORIGINAL.to_vec();
     data.extend_from_slice(
         b"\r\n3 0 obj\r\n<</Annots[9 0 R]/Type/Page>>\r\nendobj\r\nxref\r\n3 1\r\n\
           0000000070 00000 n\r\ntrailer\r\n<</Size 10/Root 1 0 R>>\r\nstartxref\r\n70\r\n%%EOF\r\n",
     );
-    // 加密的文档：字符串经过加密，不改。
+    // 加密的文档里有直接写的批注：搬进新对象要重新加密字符串，不改。
     let encrypted = String::from_utf8_lossy(&data)
         .replace("/Annots[9 0 R]", "/Annots[<</Type/Annot>>]")
         .replace("/Root 1 0 R>>", "/Root 1 0 R/Encrypt 8 0 R>>")

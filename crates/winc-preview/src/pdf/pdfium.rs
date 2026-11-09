@@ -824,7 +824,29 @@ impl Document {
         if !comment.is_empty() {
             Self::set_contents(self.api, &annot, comment)?;
         }
+        drop(annot);
+        self.settle_annotations(&page);
         Ok(())
+    }
+
+    /// 让 PDFium 为 `page` 建立批注列表：这时 PDFium 把页面 `/Annots` 中直接写的批注字典
+    /// （`FPDFPage_CreateAnnot` 就这样写）转成间接对象，规范要求批注是间接对象。把页面画进
+    /// 1 × 1 像素的位图即可触发。保存时这些对象由 PDFium 写出，加密的文件也按加密规则写。
+    fn settle_annotations(&self, page: &Page<'_>) {
+        // SAFETY: 尺寸为正；传空指针由 PDFium 分配缓冲区。
+        let handle =
+            unsafe { (self.api.bitmap_create_ex)(1, 1, BITMAP_BGRA, std::ptr::null_mut(), 0) };
+        if handle.is_null() {
+            return;
+        }
+        let bitmap = Bitmap {
+            api: self.api,
+            bitmap: handle,
+        };
+        // SAFETY: `bitmap`、`page` 都是有效句柄。
+        unsafe {
+            (self.api.render_page_bitmap)(bitmap.bitmap, page.page, 0, 0, 1, 1, 0, RENDER_FLAGS);
+        }
     }
 
     /// 写入批注的注释文字（`Contents`）。
@@ -859,7 +881,10 @@ impl Document {
             api: self.api,
             annot: handle,
         };
-        Self::set_contents(self.api, &annot, comment)
+        Self::set_contents(self.api, &annot, comment)?;
+        drop(annot);
+        self.settle_annotations(&page);
+        Ok(())
     }
 
     /// 删除第 `index` 页上第 `annotation` 个批注（[`Annotation::index`]）。

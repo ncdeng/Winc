@@ -11,8 +11,12 @@
 //! 新对象）；再按新的偏移重新生成这一段的交叉引用（交叉引用表或交叉引用流，与 PDFium 写出的
 //! 种类相同）。
 //!
-//! 原文件的内容一个字节也不改。追加的那一段里遇到任何不认得的结构（加密的文档、长度写成间接
-//! 引用的流等），就原样返回 PDFium 的输出。
+//! 加密的文档中字符串和流按所在对象的对象号加密：保留的对象原样写出、对象号不变，仍然能解密；
+//! 直接写的批注字典要搬进新对象，就得重新加密，因此加密的文档里有直接写的批注时不整理。
+//! （`pdfium` 在保存前让 PDFium 自己把新批注转成间接对象，正常情况下不会有直接写的批注。）
+//!
+//! 原文件的内容一个字节也不改。追加的那一段里遇到任何不认得的结构（长度写成间接引用的流等），
+//! 就原样返回 PDFium 的输出。
 
 use std::fmt::Write as _;
 use std::ops::Range;
@@ -42,8 +46,10 @@ struct Object<'a> {
 
 /// 增量更新末尾的交叉引用信息：要沿用的尾部字典条目和交叉引用的种类。
 struct Trailer<'a> {
-    /// `/Root`、`/Info`、`/ID`、`/Prev` 的原文。
+    /// `/Root`、`/Info`、`/ID`、`/Encrypt`、`/Prev` 的原文。
     entries: Vec<(&'static str, &'a [u8])>,
+    /// 文档是否加密（有 `/Encrypt`）。
+    encrypted: bool,
     /// 原有的 `/Size`。
     size: u32,
     /// 交叉引用流的对象号；用交叉引用表时为 `None`。
@@ -100,6 +106,10 @@ fn rewrite(original: &[u8], section: &[u8]) -> Option<Vec<u8>> {
         if inline.is_empty() {
             bodies.push((object.number, object.generation, object.body.to_vec()));
             continue;
+        }
+        // 加密的文档：批注字典里的字符串按页面的对象号加密，搬进新对象就解不开了。
+        if trailer.encrypted {
+            return None;
         }
         let mut body = Vec::with_capacity(object.body.len());
         let mut at = 0;
@@ -282,21 +292,18 @@ fn parse_section(section: &[u8]) -> Option<(Vec<Object<'_>>, Trailer<'_>)> {
     }
 }
 
-/// 从尾部字典（或交叉引用流的字典）`dict` 取出要沿用的条目；文档加密时返回 `None`（加密的
-/// 文档中字符串经过加密，不能照搬）。
+/// 从尾部字典（或交叉引用流的字典）`dict` 取出要沿用的条目。
 fn trailer_from(dict: &[u8], stream: Option<u32>) -> Option<Trailer<'_>> {
     let entries = dict_entries(dict)?;
-    if entries.iter().any(|(k, _)| *k == b"Encrypt") {
-        return None;
-    }
     let mut kept = Vec::new();
-    for key in ["Root", "Info", "ID", "Prev"] {
+    for key in ["Root", "Info", "ID", "Encrypt", "Prev"] {
         if let Some((_, value)) = entries.iter().find(|(k, _)| *k == key.as_bytes()) {
             kept.push((key, *value));
         }
     }
     let size = dict_number(dict, b"Size")?;
     Some(Trailer {
+        encrypted: kept.iter().any(|(key, _)| *key == "Encrypt"),
         entries: kept,
         size: u32::try_from(size).ok()?,
         stream,
